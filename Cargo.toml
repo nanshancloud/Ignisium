@@ -1,0 +1,6 @@
+﻿[workspace]
+members = [
+    "crates/ignisium-core",
+]
+
+resolver = "3"
