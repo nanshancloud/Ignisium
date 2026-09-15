@@ -1,8 +1,13 @@
+use crate::text::{StringTextStore, TextStore};
 use crate::{TextOffset, TextRange};
 
+/// A text document.
+///
+/// `Document` does not touch `String` directly. It talks to the storage layer
+/// through `TextStore` so the backend can be replaced later.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
-    text: String,
+    store: StringTextStore,
 }
 
 impl Document {
@@ -11,15 +16,23 @@ impl Document {
     }
 
     pub fn text(&self) -> &str {
-        &self.text
+        self.store.as_str()
+    }
+
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.store.is_empty()
     }
 
     pub fn insert(&mut self, offset: TextOffset, text: &str) {
-        self.text.insert_str(offset.0, text);
+        self.store.insert(offset, text);
     }
 
     pub fn delete(&mut self, range: TextRange) {
-        self.text.replace_range(range.start.0..range.end.0, "");
+        self.store.delete(range);
     }
 }
 
@@ -32,6 +45,7 @@ mod tests {
         let document = Document::new();
 
         assert_eq!(document.text(), "");
+        assert!(document.is_empty());
     }
 
     #[test]
