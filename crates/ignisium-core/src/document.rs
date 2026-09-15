@@ -77,4 +77,57 @@ mod tests {
 
         assert_eq!(document.text(), "Ho");
     }
+
+    #[test]
+    fn unicode_text() {
+        let mut document = Document::new();
+
+        document.insert(TextOffset(0), "你好");
+
+        assert_eq!(document.text(), "你好");
+    }
+
+    #[test]
+    fn unicode_append() {
+        let mut document = Document::new();
+
+        document.insert(TextOffset(0), "你好");
+        document.insert(TextOffset(6), "世界");
+
+        assert_eq!(document.text(), "你好世界");
+    }
+
+    #[test]
+    fn unicode_len_is_byte_length() {
+        let mut document = Document::new();
+
+        document.insert(TextOffset(0), "你好");
+
+        assert_eq!(document.text().chars().count(), 2);
+        assert_eq!(document.len(), 6);
+    }
+
+    #[test]
+    fn delete_unicode_char_by_byte_range() {
+        let mut document = Document::new();
+
+        document.insert(TextOffset(0), "你好");
+        document.delete(TextRange::new(TextOffset(0), TextOffset(3)));
+
+        assert_eq!(document.text(), "好");
+    }
+
+    // Known limitation, recorded in ADR-0001:
+    // TextOffset is a UTF-8 byte offset, so an offset that lands inside a
+    // multi-byte character is invalid. The current backend panics instead of
+    // silently corrupting the text. This behavior is not final; the public API
+    // should eventually validate offsets before touching the store.
+    #[test]
+    #[should_panic]
+    fn insert_inside_utf8_character_panics() {
+        let mut document = Document::new();
+
+        document.insert(TextOffset(0), "你好");
+        document.insert(TextOffset(1), "x");
+    }
 }
