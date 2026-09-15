@@ -1,3 +1,7 @@
+mod store;
+
+pub use store::{StringTextStore, TextStore};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TextOffset(pub usize);
 
