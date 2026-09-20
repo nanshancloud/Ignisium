@@ -31,6 +31,11 @@ impl Document {
         self.store.is_empty()
     }
 
+    /// Whether `offset` sits on a UTF-8 character boundary.
+    pub fn is_char_boundary(&self, offset: TextOffset) -> bool {
+        self.store.is_char_boundary(offset)
+    }
+
     pub fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()> {
         self.store.insert(offset, text)
     }
@@ -43,6 +48,7 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::TextError;
 
     #[test]
     fn create_empty_document() {
@@ -125,15 +131,57 @@ mod tests {
         assert_eq!(document.text(), "好");
     }
 
-    // Known limitation, recorded in ADR-0001:
-    // TextOffset is a UTF-8 byte offset, so an offset that lands inside a
-    // multi-byte character is invalid. Validation is introduced in ADR-0003.
     #[test]
-    #[should_panic]
-    fn insert_inside_utf8_character_panics() {
+    fn char_boundary_reflects_utf8_layout() {
         let mut document = Document::new();
 
         document.insert(TextOffset(0), "你好").unwrap();
-        document.insert(TextOffset(1), "x").unwrap();
+
+        assert!(document.is_char_boundary(TextOffset(0)));
+        assert!(document.is_char_boundary(TextOffset(3)));
+        assert!(document.is_char_boundary(TextOffset(6)));
+        assert!(!document.is_char_boundary(TextOffset(1)));
+        assert!(!document.is_char_boundary(TextOffset(2)));
+    }
+
+    // Replaces the `#[should_panic]` test from week 2: invalid input is now a
+    // value the caller can handle, and the document is left untouched.
+    #[test]
+    fn insert_inside_utf8_character_returns_error() {
+        let mut document = Document::new();
+
+        document.insert(TextOffset(0), "你好").unwrap();
+
+        assert_eq!(
+            document.insert(TextOffset(1), "x"),
+            Err(TextError::NotCharBoundary { offset: 1 })
+        );
+        assert_eq!(document.text(), "你好");
+    }
+
+    #[test]
+    fn insert_after_end_returns_error() {
+        let mut document = Document::new();
+
+        document.insert(TextOffset(0), "Hi").unwrap();
+
+        assert_eq!(
+            document.insert(TextOffset(9), "!"),
+            Err(TextError::OffsetOutOfRange { offset: 9, len: 2 })
+        );
+        assert_eq!(document.text(), "Hi");
+    }
+
+    #[test]
+    fn delete_inverted_range_returns_error() {
+        let mut document = Document::new();
+
+        document.insert(TextOffset(0), "Hello").unwrap();
+
+        assert_eq!(
+            document.delete(TextRange::new(TextOffset(3), TextOffset(1))),
+            Err(TextError::InvalidRange { start: 3, end: 1 })
+        );
+        assert_eq!(document.text(), "Hello");
     }
 }
