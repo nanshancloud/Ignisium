@@ -1,3 +1,4 @@
+use crate::error::TextResult;
 use crate::text::{StringTextStore, TextStore};
 use crate::{TextOffset, TextRange};
 
@@ -5,6 +6,9 @@ use crate::{TextOffset, TextRange};
 ///
 /// `Document` does not touch `String` directly. It talks to the storage layer
 /// through `TextStore` so the backend can be replaced later.
+///
+/// Editing operations return `TextResult<()>`: invalid offsets are reported as
+/// `TextError`, never as a panic. See ADR-0003.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
     store: StringTextStore,
@@ -27,12 +31,12 @@ impl Document {
         self.store.is_empty()
     }
 
-    pub fn insert(&mut self, offset: TextOffset, text: &str) {
-        self.store.insert(offset, text);
+    pub fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()> {
+        self.store.insert(offset, text)
     }
 
-    pub fn delete(&mut self, range: TextRange) {
-        self.store.delete(range);
+    pub fn delete(&mut self, range: TextRange) -> TextResult<()> {
+        self.store.delete(range)
     }
 }
 
@@ -52,7 +56,7 @@ mod tests {
     fn insert_text() {
         let mut document = Document::new();
 
-        document.insert(TextOffset(0), "Hello");
+        document.insert(TextOffset(0), "Hello").unwrap();
 
         assert_eq!(document.text(), "Hello");
     }
@@ -61,8 +65,8 @@ mod tests {
     fn insert_middle() {
         let mut document = Document::new();
 
-        document.insert(TextOffset(0), "Hllo");
-        document.insert(TextOffset(1), "e");
+        document.insert(TextOffset(0), "Hllo").unwrap();
+        document.insert(TextOffset(1), "e").unwrap();
 
         assert_eq!(document.text(), "Hello");
     }
@@ -71,9 +75,11 @@ mod tests {
     fn delete_text() {
         let mut document = Document::new();
 
-        document.insert(TextOffset(0), "Hello");
+        document.insert(TextOffset(0), "Hello").unwrap();
 
-        document.delete(TextRange::new(TextOffset(1), TextOffset(4)));
+        document
+            .delete(TextRange::new(TextOffset(1), TextOffset(4)))
+            .unwrap();
 
         assert_eq!(document.text(), "Ho");
     }
@@ -82,7 +88,7 @@ mod tests {
     fn unicode_text() {
         let mut document = Document::new();
 
-        document.insert(TextOffset(0), "你好");
+        document.insert(TextOffset(0), "你好").unwrap();
 
         assert_eq!(document.text(), "你好");
     }
@@ -91,8 +97,8 @@ mod tests {
     fn unicode_append() {
         let mut document = Document::new();
 
-        document.insert(TextOffset(0), "你好");
-        document.insert(TextOffset(6), "世界");
+        document.insert(TextOffset(0), "你好").unwrap();
+        document.insert(TextOffset(6), "世界").unwrap();
 
         assert_eq!(document.text(), "你好世界");
     }
@@ -101,7 +107,7 @@ mod tests {
     fn unicode_len_is_byte_length() {
         let mut document = Document::new();
 
-        document.insert(TextOffset(0), "你好");
+        document.insert(TextOffset(0), "你好").unwrap();
 
         assert_eq!(document.text().chars().count(), 2);
         assert_eq!(document.len(), 6);
@@ -111,23 +117,23 @@ mod tests {
     fn delete_unicode_char_by_byte_range() {
         let mut document = Document::new();
 
-        document.insert(TextOffset(0), "你好");
-        document.delete(TextRange::new(TextOffset(0), TextOffset(3)));
+        document.insert(TextOffset(0), "你好").unwrap();
+        document
+            .delete(TextRange::new(TextOffset(0), TextOffset(3)))
+            .unwrap();
 
         assert_eq!(document.text(), "好");
     }
 
     // Known limitation, recorded in ADR-0001:
     // TextOffset is a UTF-8 byte offset, so an offset that lands inside a
-    // multi-byte character is invalid. The current backend panics instead of
-    // silently corrupting the text. This behavior is not final; the public API
-    // should eventually validate offsets before touching the store.
+    // multi-byte character is invalid. Validation is introduced in ADR-0003.
     #[test]
     #[should_panic]
     fn insert_inside_utf8_character_panics() {
         let mut document = Document::new();
 
-        document.insert(TextOffset(0), "你好");
-        document.insert(TextOffset(1), "x");
+        document.insert(TextOffset(0), "你好").unwrap();
+        document.insert(TextOffset(1), "x").unwrap();
     }
 }
