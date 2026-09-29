@@ -4,6 +4,11 @@
 
 Accepted temporarily.
 
+Superseded by ADR-0004 for the position model. Byte offsets stay canonical; the
+other coordinate systems (scalar, grapheme, line/column) are named but deferred.
+See `docs/decisions/0004-text-position-model.md` and
+`docs/design/text-position.md`.
+
 ## Decision
 
 TextOffset currently represents a UTF-8 byte offset.
