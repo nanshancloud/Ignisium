@@ -20,6 +20,12 @@ pub enum TextError {
 
     /// The range is unusable: `start` is after `end`, or an endpoint is invalid.
     InvalidRange { start: usize, end: usize },
+
+    /// The document refuses edits because it is read-only.
+    ///
+    /// This is the first variant that describes document policy rather than
+    /// offset validity, added with the document metadata in week 5 (ADR-0005).
+    ReadOnly,
 }
 
 /// Shorthand for results of text operations.
@@ -40,6 +46,7 @@ impl fmt::Display for TextError {
             TextError::InvalidRange { start, end } => {
                 write!(f, "invalid text range [{start}, {end})")
             }
+            TextError::ReadOnly => write!(f, "the document is read-only"),
         }
     }
 }
