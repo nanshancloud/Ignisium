@@ -1,3 +1,4 @@
+use crate::edit::{EditProblem, TextEdit};
 use crate::error::{TextError, TextResult};
 use crate::metadata::DocumentMetadata;
 use crate::revision::RevisionId;
@@ -22,6 +23,10 @@ use crate::{TextOffset, TextRange};
 /// Editing operations return `TextResult<RevisionId>`: invalid offsets are
 /// reported as `TextError`, never as a panic (ADR-0003), and a successful edit
 /// reports the revision it produced.
+///
+/// Since v0.4 several edits can be applied as one atomic transaction through
+/// [`Document::apply_edits`], which advances the revision once no matter how
+/// many edits it contains. See ADR-0006.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
     store: StringTextStore,
@@ -115,6 +120,172 @@ impl Document {
         self.guard_writable()?;
         self.store.delete(range)?;
         Ok(self.advance_revision())
+    }
+
+    /// Replaces `range` with `text` as one edit.
+    ///
+    /// Replacing with an empty string is a delete; replacing an empty range is
+    /// an insertion.
+    pub fn replace(&mut self, range: TextRange, text: &str) -> TextResult<RevisionId> {
+        self.apply_edits(&[TextEdit::replace(range, text)])
+    }
+
+    /// Applies `edits` as one atomic transaction and returns the revision the
+    /// transaction produced.
+    ///
+    /// All offsets in the batch are interpreted against the text as it was when
+    /// `apply_edits` was called. The rules are:
+    ///
+    /// - **All or nothing.** Every edit is validated first. If any edit is
+    ///   invalid, the text is left exactly as it was and the first problem is
+    ///   returned. Use [`Document::edit_problems`] to see all of them.
+    /// - **No overlap.** Two edits may not claim the same text. Ranges must not
+    ///   intersect, and an insertion may not sit inside a range that another
+    ///   edit removes. Combine two edits on the same spot into a single
+    ///   [`TextEdit::replace`].
+    /// - **One revision.** A transaction advances the revision exactly once,
+    ///   however many edits it contains.
+    /// - **No work, no revision.** Edits that would change nothing (inserting
+    ///   `""`, deleting an empty range) are dropped before anything is
+    ///   validated, so a batch never fails because of an edit with no effect.
+    ///
+    /// Edits are applied from the end of the document towards the start, so an
+    /// edit never moves the text another edit still has to touch.
+    ///
+    /// ```text
+    /// text:  "  if x {"
+    /// edits: Delete [0, 2), Insert at 2 "\n  "
+    /// after: "\n  if x {"   (one transaction, one new revision)
+    /// ```
+    pub fn apply_edits(&mut self, edits: &[TextEdit]) -> TextResult<RevisionId> {
+        self.guard_writable()?;
+
+        if let Some(problem) = self.edit_problems(edits).first() {
+            return Err(problem.error.clone());
+        }
+
+        let mut ordered: Vec<(usize, &TextEdit)> = edits
+            .iter()
+            .enumerate()
+            .filter(|(_, edit)| !edit.is_noop())
+            .collect();
+
+        if ordered.is_empty() {
+            return Ok(self.revision);
+        }
+
+        // Back to front, so that every edit still sees the coordinates it was
+        // written with:
+        //
+        // - higher offsets first, since they do not move lower ones;
+        // - at the same offset, ranges before insertions, so a range removes
+        //   the original bytes instead of the bytes just inserted there;
+        // - at the same offset and kind, in reverse batch order, because
+        //   inserting at one offset pushes previous text aside.
+        ordered.sort_by(|(left_index, left), (right_index, right)| {
+            right
+                .span()
+                .start
+                .cmp(&left.span().start)
+                .then_with(|| left.is_insertion().cmp(&right.is_insertion()))
+                .then_with(|| right_index.cmp(left_index))
+        });
+
+        for (_, edit) in ordered {
+            self.apply_edit(edit)?;
+        }
+
+        Ok(self.advance_revision())
+    }
+
+    /// Reports every problem with `edits`, without touching the text.
+    ///
+    /// The problems are returned in batch order. An empty result means the
+    /// batch can be applied to the current text.
+    ///
+    /// This checks the edits against the text only. Whether the document
+    /// accepts edits at all (`read_only`) is answered by `apply_edits`.
+    ///
+    /// ```text
+    /// text:  "abc"
+    /// edits: Insert at 1 "x", Delete [0, 9)
+    /// result: [EditProblem { index: 1, error: OffsetOutOfRange { .. } }]
+    /// ```
+    pub fn edit_problems(&self, edits: &[TextEdit]) -> Vec<EditProblem> {
+        let effective: Vec<(usize, &TextEdit)> = edits
+            .iter()
+            .enumerate()
+            .filter(|(_, edit)| !edit.is_noop())
+            .collect();
+
+        let mut problems = Vec::new();
+
+        for (position, (index, edit)) in effective.iter().enumerate() {
+            self.collect_range_problems(*index, edit, &mut problems);
+
+            for (other_index, other) in effective.iter().take(position) {
+                if edit.claim().intersects(&other.claim()) {
+                    problems.push(EditProblem {
+                        index: *index,
+                        error: TextError::OverlappingEdits {
+                            first: *other_index,
+                            second: *index,
+                        },
+                    });
+                }
+            }
+        }
+
+        problems.sort_by_key(|problem| problem.index);
+
+        problems
+    }
+
+    /// One edit, applied to a document whose text already passed validation.
+    fn apply_edit(&mut self, edit: &TextEdit) -> TextResult<()> {
+        match edit {
+            TextEdit::Insert { offset, text } => self.store.insert(*offset, text)?,
+            TextEdit::Delete { range } => self.store.delete(*range)?,
+            TextEdit::Replace { range, text } => {
+                // The range was validated against the text as it was, and
+                // `range.start` stays a character boundary after the removal.
+                self.store.delete(*range)?;
+                self.store.insert(range.start, text)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn collect_range_problems(
+        &self,
+        index: usize,
+        edit: &TextEdit,
+        problems: &mut Vec<EditProblem>,
+    ) {
+        let range = edit.span();
+
+        if range.start > range.end {
+            problems.push(EditProblem {
+                index,
+                error: TextError::InvalidRange {
+                    start: range.start.0,
+                    end: range.end.0,
+                },
+            });
+
+            return;
+        }
+
+        // An insertion has a single endpoint; checking it twice would report
+        // the same problem twice.
+        let endpoints = if edit.is_insertion() { 1 } else { 2 };
+
+        for offset in [range.start, range.end].into_iter().take(endpoints) {
+            if let Err(error) = self.store.validate_offset(offset) {
+                problems.push(EditProblem { index, error });
+            }
+        }
     }
 
     /// Read-only is document policy, not offset policy.
@@ -394,5 +565,342 @@ mod tests {
         document.set_read_only(false);
 
         assert_eq!(document.revision(), RevisionId::INITIAL.next());
+    }
+
+    // -- replace ----------------------------------------------------------
+
+    #[test]
+    fn replace_swaps_a_range_for_new_text() {
+        let mut document = Document::from_text("Hello world");
+
+        document
+            .replace(TextRange::new(TextOffset(6), TextOffset(11)), "there")
+            .unwrap();
+
+        assert_eq!(document.text(), "Hello there");
+    }
+
+    #[test]
+    fn replace_with_nothing_is_a_delete() {
+        let mut document = Document::from_text("Hello");
+
+        document
+            .replace(TextRange::new(TextOffset(0), TextOffset(1)), "")
+            .unwrap();
+
+        assert_eq!(document.text(), "ello");
+    }
+
+    #[test]
+    fn replacing_an_empty_range_is_an_insertion() {
+        let mut document = Document::from_text("Hllo");
+
+        document
+            .replace(TextRange::new(TextOffset(1), TextOffset(1)), "e")
+            .unwrap();
+
+        assert_eq!(document.text(), "Hello");
+    }
+
+    #[test]
+    fn replace_is_one_edit_and_one_revision() {
+        let mut document = Document::from_text("abc");
+
+        assert_eq!(
+            document.replace(TextRange::new(TextOffset(0), TextOffset(1)), "x"),
+            Ok(RevisionId::INITIAL.next())
+        );
+        assert_eq!(document.text(), "xbc");
+    }
+
+    // -- transactions -----------------------------------------------------
+
+    #[test]
+    fn a_transaction_advances_the_revision_once() {
+        let mut document = Document::from_text("  if x {");
+
+        let revision = document
+            .apply_edits(&[
+                TextEdit::delete(TextRange::new(TextOffset(0), TextOffset(2))),
+                TextEdit::insert(TextOffset(2), "\n  "),
+            ])
+            .unwrap();
+
+        assert_eq!(revision, RevisionId::INITIAL.next());
+        assert_eq!(document.revision(), revision);
+        assert_eq!(document.text(), "\n  if x {");
+    }
+
+    #[test]
+    fn edits_are_written_against_the_text_before_the_batch() {
+        let mut document = Document::from_text("one two three");
+
+        document
+            .apply_edits(&[
+                TextEdit::replace(TextRange::new(TextOffset(0), TextOffset(3)), "1"),
+                TextEdit::replace(TextRange::new(TextOffset(8), TextOffset(13)), "3"),
+            ])
+            .unwrap();
+
+        assert_eq!(document.text(), "1 two 3");
+    }
+
+    #[test]
+    fn touching_ranges_may_be_deleted_in_one_batch() {
+        let mut document = Document::from_text("abcdef");
+
+        document
+            .apply_edits(&[
+                TextEdit::delete(TextRange::new(TextOffset(0), TextOffset(2))),
+                TextEdit::delete(TextRange::new(TextOffset(2), TextOffset(4))),
+            ])
+            .unwrap();
+
+        assert_eq!(document.text(), "ef");
+    }
+
+    #[test]
+    fn overlapping_ranges_are_rejected() {
+        let mut document = Document::from_text("abcdef");
+
+        assert_eq!(
+            document.apply_edits(&[
+                TextEdit::delete(TextRange::new(TextOffset(0), TextOffset(4))),
+                TextEdit::delete(TextRange::new(TextOffset(2), TextOffset(6))),
+            ]),
+            Err(TextError::OverlappingEdits {
+                first: 0,
+                second: 1
+            })
+        );
+        assert_eq!(document.text(), "abcdef");
+        assert_eq!(document.revision(), RevisionId::INITIAL);
+    }
+
+    #[test]
+    fn an_insertion_inside_a_deleted_range_is_rejected() {
+        let mut document = Document::from_text("abcdef");
+
+        assert_eq!(
+            document.apply_edits(&[
+                TextEdit::delete(TextRange::new(TextOffset(0), TextOffset(6))),
+                TextEdit::insert(TextOffset(3), "x"),
+            ]),
+            Err(TextError::OverlappingEdits {
+                first: 0,
+                second: 1
+            })
+        );
+        assert_eq!(document.text(), "abcdef");
+    }
+
+    #[test]
+    fn a_failing_edit_rolls_the_whole_batch_back() {
+        let mut document = Document::from_text("abc");
+
+        assert_eq!(
+            document.apply_edits(&[
+                TextEdit::insert(TextOffset(0), "1"),
+                TextEdit::insert(TextOffset(99), "2"),
+                TextEdit::insert(TextOffset(2), "3"),
+            ]),
+            Err(TextError::OffsetOutOfRange { offset: 99, len: 3 })
+        );
+
+        assert_eq!(document.text(), "abc");
+        assert_eq!(document.revision(), RevisionId::INITIAL);
+    }
+
+    #[test]
+    fn an_empty_batch_changes_nothing() {
+        let mut document = Document::from_text("abc");
+
+        assert_eq!(document.apply_edits(&[]), Ok(RevisionId::INITIAL));
+        assert_eq!(document.text(), "abc");
+        assert_eq!(document.revision(), RevisionId::INITIAL);
+    }
+
+    #[test]
+    fn a_batch_of_no_ops_changes_nothing() {
+        let mut document = Document::from_text("abc");
+
+        assert_eq!(
+            document.apply_edits(&[
+                TextEdit::insert(TextOffset(1), ""),
+                TextEdit::delete(TextRange::new(TextOffset(1), TextOffset(1))),
+            ]),
+            Ok(RevisionId::INITIAL)
+        );
+
+        assert_eq!(document.text(), "abc");
+        assert_eq!(document.revision(), RevisionId::INITIAL);
+    }
+
+    #[test]
+    fn no_op_edits_are_dropped_before_validation() {
+        let mut document = Document::from_text("abc");
+
+        // Even an out-of-range offset is ignored: an edit that would change
+        // nothing has no effect and therefore nothing to complain about.
+        assert_eq!(
+            document.apply_edits(&[TextEdit::insert(TextOffset(99), "")]),
+            Ok(RevisionId::INITIAL)
+        );
+        assert_eq!(document.text(), "abc");
+    }
+
+    #[test]
+    fn an_insertion_at_the_start_of_a_deleted_range_is_rejected() {
+        let mut document = Document::from_text("  if x {");
+
+        // Both edits want the byte at offset 2, so the host has to write this
+        // as a single `replace` instead.
+        assert_eq!(
+            document.apply_edits(&[
+                TextEdit::delete(TextRange::new(TextOffset(2), TextOffset(3))),
+                TextEdit::insert(TextOffset(2), "x"),
+            ]),
+            Err(TextError::OverlappingEdits {
+                first: 0,
+                second: 1
+            })
+        );
+        assert_eq!(document.text(), "  if x {");
+    }
+
+    #[test]
+    fn transactions_work_on_unicode_text() {
+        let mut document = Document::from_text("你好世界");
+
+        document
+            .apply_edits(&[
+                TextEdit::replace(TextRange::new(TextOffset(0), TextOffset(3)), "您"),
+                TextEdit::insert(TextOffset(12), "!"),
+            ])
+            .unwrap();
+
+        assert_eq!(document.text(), "您好世界!");
+    }
+
+    #[test]
+    fn a_batch_never_splits_a_character() {
+        let mut document = Document::from_text("你好");
+
+        assert_eq!(
+            document.apply_edits(&[TextEdit::delete(TextRange::new(
+                TextOffset(1),
+                TextOffset(3)
+            ))]),
+            Err(TextError::NotCharBoundary { offset: 1 })
+        );
+        assert_eq!(document.text(), "你好");
+    }
+
+    #[test]
+    fn read_only_documents_refuse_transactions() {
+        let mut document = Document::from_text("abc");
+        document.set_read_only(true);
+
+        assert_eq!(
+            document.apply_edits(&[TextEdit::insert(TextOffset(0), "x")]),
+            Err(TextError::ReadOnly)
+        );
+        assert_eq!(document.text(), "abc");
+    }
+
+    // -- edit problems ----------------------------------------------------
+
+    #[test]
+    fn every_problem_is_reported_in_batch_order() {
+        let document = Document::from_text("abc");
+
+        let problems = document.edit_problems(&[
+            TextEdit::insert(TextOffset(99), "x"),
+            TextEdit::delete(TextRange::new(TextOffset(0), TextOffset(0))),
+            TextEdit::delete(TextRange::new(TextOffset(3), TextOffset(1))),
+        ]);
+
+        assert_eq!(
+            problems,
+            vec![
+                EditProblem {
+                    index: 0,
+                    error: TextError::OffsetOutOfRange { offset: 99, len: 3 },
+                },
+                EditProblem {
+                    index: 2,
+                    error: TextError::InvalidRange { start: 3, end: 1 },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn both_endpoints_of_a_range_are_checked() {
+        let document = Document::from_text("abc");
+
+        let problems = document.edit_problems(&[TextEdit::delete(TextRange::new(
+            TextOffset(9),
+            TextOffset(12),
+        ))]);
+
+        assert_eq!(problems.len(), 2);
+        assert_eq!(
+            problems[0].error,
+            TextError::OffsetOutOfRange { offset: 9, len: 3 }
+        );
+        assert_eq!(
+            problems[1].error,
+            TextError::OffsetOutOfRange { offset: 12, len: 3 }
+        );
+    }
+
+    #[test]
+    fn overlapping_edits_are_reported_once_per_pair() {
+        let document = Document::from_text("abcdef");
+
+        let problems = document.edit_problems(&[
+            TextEdit::delete(TextRange::new(TextOffset(0), TextOffset(4))),
+            TextEdit::delete(TextRange::new(TextOffset(2), TextOffset(5))),
+            TextEdit::delete(TextRange::new(TextOffset(1), TextOffset(3))),
+        ]);
+
+        assert_eq!(
+            problems,
+            vec![
+                EditProblem {
+                    index: 1,
+                    error: TextError::OverlappingEdits {
+                        first: 0,
+                        second: 1
+                    },
+                },
+                EditProblem {
+                    index: 2,
+                    error: TextError::OverlappingEdits {
+                        first: 0,
+                        second: 2
+                    },
+                },
+                EditProblem {
+                    index: 2,
+                    error: TextError::OverlappingEdits {
+                        first: 1,
+                        second: 2
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_valid_batch_has_no_problems() {
+        let document = Document::from_text("abc");
+
+        assert!(
+            document
+                .edit_problems(&[TextEdit::insert(TextOffset(3), "x")])
+                .is_empty()
+        );
     }
 }

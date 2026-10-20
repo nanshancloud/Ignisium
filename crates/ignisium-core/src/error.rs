@@ -26,6 +26,12 @@ pub enum TextError {
     /// This is the first variant that describes document policy rather than
     /// offset validity, added with the document metadata in week 5 (ADR-0005).
     ReadOnly,
+
+    /// Two edits of the same batch claim the same text.
+    ///
+    /// `first` and `second` are indexes into the batch that was applied, with
+    /// `first < second`.
+    OverlappingEdits { first: usize, second: usize },
 }
 
 /// Shorthand for results of text operations.
@@ -47,6 +53,10 @@ impl fmt::Display for TextError {
                 write!(f, "invalid text range [{start}, {end})")
             }
             TextError::ReadOnly => write!(f, "the document is read-only"),
+            TextError::OverlappingEdits { first, second } => write!(
+                f,
+                "edits {first} and {second} of the batch claim the same text"
+            ),
         }
     }
 }
