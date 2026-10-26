@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::error::{TextError, TextResult};
 use crate::{TextOffset, TextRange};
 
@@ -12,6 +14,12 @@ use crate::{TextOffset, TextRange};
 /// v0.2: mutating operations are fallible. Offsets are validated before the
 /// backend is touched, so invalid input becomes a `TextError` instead of a
 /// panic. See ADR-0003.
+///
+/// v0.3: the whole text and any range of it can be read without knowing how
+/// the text is stored. A contiguous backend answers with a borrowed slice, a
+/// backend that keeps the text in chunks answers with an owned string. The
+/// trait asks for the *text*, never for chunks, so the storage layout stays
+/// behind the boundary. See ADR-0008.
 pub trait TextStore {
     /// Length of the stored text in UTF-8 bytes.
     fn len(&self) -> usize;
@@ -20,8 +28,19 @@ pub trait TextStore {
         self.len() == 0
     }
 
-    /// Whole text as a single string slice.
-    fn as_str(&self) -> &str;
+    /// The whole text.
+    ///
+    /// The result is a snapshot, not a view: a backend that stores the text in
+    /// chunks has to materialise it. Callers that only need a part of the text
+    /// should use [`TextStore::text_in`], which stays proportional to the
+    /// range that is asked for.
+    fn text(&self) -> Cow<'_, str>;
+
+    /// A range of the text, `[start, end)`.
+    ///
+    /// The range is validated before it is read, so an invalid range is a
+    /// `TextError` and never a panic.
+    fn text_in(&self, range: TextRange) -> TextResult<Cow<'_, str>>;
 
     fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()>;
 
@@ -29,12 +48,11 @@ pub trait TextStore {
 
     /// Whether `offset` sits on a UTF-8 character boundary.
     ///
-    /// The default implementation goes through `as_str()`, which is O(1) for a
-    /// contiguous backend but may be expensive for a chunked one. Backends that
-    /// can answer cheaper should override it.
-    fn is_char_boundary(&self, offset: TextOffset) -> bool {
-        self.as_str().is_char_boundary(offset.0)
-    }
+    /// An offset past the end of the text is not a boundary. Backends answer
+    /// this without materialising the text, which matters for chunked
+    /// backends: the check has to stay cheap, because every edit goes through
+    /// it.
+    fn is_char_boundary(&self, offset: TextOffset) -> bool;
 
     /// Reject offsets that are past the end or inside a multi-byte character.
     ///
@@ -83,6 +101,15 @@ impl StringTextStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// The text as a borrowed slice.
+    ///
+    /// Only a contiguous backend can offer this without copying, so it is an
+    /// inherent method and not part of the trait: the generic API is
+    /// [`TextStore::text`] and [`TextStore::text_in`].
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
 }
 
 impl TextStore for StringTextStore {
@@ -90,8 +117,14 @@ impl TextStore for StringTextStore {
         self.text.len()
     }
 
-    fn as_str(&self) -> &str {
-        &self.text
+    fn text(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.text)
+    }
+
+    fn text_in(&self, range: TextRange) -> TextResult<Cow<'_, str>> {
+        self.validate_range(range)?;
+
+        Ok(Cow::Borrowed(&self.text[range.start.0..range.end.0]))
     }
 
     fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()> {
@@ -105,8 +138,14 @@ impl TextStore for StringTextStore {
         self.text.replace_range(range.start.0..range.end.0, "");
         Ok(())
     }
-}
 
+    fn is_char_boundary(&self, offset: TextOffset) -> bool {
+        // `str::is_char_boundary` panics for an index past the end, and this
+        // method is public: an offset from a host must not be able to take the
+        // process down.
+        offset.0 <= self.text.len() && self.text.is_char_boundary(offset.0)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +204,15 @@ mod tests {
     }
 
     #[test]
+    fn an_offset_past_the_end_is_not_a_boundary() {
+        let store = StringTextStore::new();
+
+        // `str::is_char_boundary` panics for such an index, the store does not.
+        assert!(!store.is_char_boundary(TextOffset(1)));
+        assert!(!store.is_char_boundary(TextOffset(99)));
+    }
+
+    #[test]
     fn insert_out_of_range_is_an_error() {
         let mut store = StringTextStore::new();
 
@@ -203,6 +251,58 @@ mod tests {
         assert_eq!(store.as_str(), "Hello");
     }
 
+    #[test]
+    fn the_whole_text_is_borrowed_by_a_contiguous_backend() {
+        let mut store = StringTextStore::new();
+
+        store.insert(TextOffset(0), "Hello").unwrap();
+
+        assert!(matches!(store.text(), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_range_of_the_text_is_borrowed_by_a_contiguous_backend() {
+        let mut store = StringTextStore::new();
+
+        store.insert(TextOffset(0), "Hello").unwrap();
+
+        let range = store
+            .text_in(TextRange::new(TextOffset(1), TextOffset(4)))
+            .unwrap();
+
+        assert_eq!(range, "ell");
+        assert!(matches!(range, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn an_invalid_range_cannot_be_read() {
+        let mut store = StringTextStore::new();
+
+        store.insert(TextOffset(0), "Hello").unwrap();
+
+        assert_eq!(
+            store.text_in(TextRange::new(TextOffset(3), TextOffset(1))),
+            Err(TextError::InvalidRange { start: 3, end: 1 })
+        );
+        assert_eq!(
+            store.text_in(TextRange::new(TextOffset(0), TextOffset(99))),
+            Err(TextError::OffsetOutOfRange { offset: 99, len: 5 })
+        );
+    }
+
+    #[test]
+    fn an_empty_range_is_empty_text() {
+        let mut store = StringTextStore::new();
+
+        store.insert(TextOffset(0), "Hello").unwrap();
+
+        let range = store
+            .text_in(TextRange::new(TextOffset(2), TextOffset(2)))
+            .unwrap();
+
+        assert_eq!(range, "");
+    }
+
     // Trait object check: the abstraction is usable through `dyn TextStore`,
     // so a host can hold a backend without knowing its concrete type.
     // `Document` itself still uses the concrete type, see ADR-0002.
@@ -213,7 +313,22 @@ mod tests {
 
         store.insert(TextOffset(0), "你好").unwrap();
 
-        assert_eq!(store.as_str(), "你好");
+        assert_eq!(store.text(), "你好");
         assert_eq!(store.len(), 6);
+    }
+
+    #[test]
+    fn read_through_trait_object() {
+        let mut store = StringTextStore::new();
+        store.insert(TextOffset(0), "Hello").unwrap();
+
+        let store: &dyn TextStore = &store;
+
+        assert_eq!(
+            store
+                .text_in(TextRange::new(TextOffset(0), TextOffset(2)))
+                .unwrap(),
+            "He"
+        );
     }
 }

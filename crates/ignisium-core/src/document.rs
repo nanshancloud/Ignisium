@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::edit::{EditProblem, TextEdit};
 use crate::error::{TextError, TextResult};
 use crate::metadata::DocumentMetadata;
@@ -24,17 +26,31 @@ use crate::{TextOffset, TextRange};
 /// reported as `TextError`, never as a panic (ADR-0003), and a successful edit
 /// reports the revision it produced.
 ///
-/// Since v0.4 several edits can be applied as one atomic transaction through
+/// Since v0.5 several edits can be applied as one atomic transaction through
 /// [`Document::apply_edits`], which advances the revision once no matter how
 /// many edits it contains. See ADR-0006.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Document {
-    store: StringTextStore,
+///
+/// Since v0.6 the document is generic over its storage backend
+/// (`Document<S: TextStore>`), so a second backend can be used through the
+/// same document API. See ADR-0008.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Document<S: TextStore = StringTextStore> {
+    store: S,
     metadata: DocumentMetadata,
     revision: RevisionId,
 }
 
-impl Document {
+impl Default for Document<StringTextStore> {
+    fn default() -> Self {
+        Self {
+            store: StringTextStore::new(),
+            metadata: DocumentMetadata::default(),
+            revision: RevisionId::INITIAL,
+        }
+    }
+}
+
+impl Document<StringTextStore> {
     /// Creates an empty, writable document at [`RevisionId::INITIAL`].
     pub fn new() -> Self {
         Self::default()
@@ -56,10 +72,35 @@ impl Document {
 
         document
     }
+}
 
-    /// The whole text as one string slice.
-    pub fn text(&self) -> &str {
-        self.store.as_str()
+impl<S: TextStore> Document<S> {
+    /// Creates a document on top of an existing store.
+    ///
+    /// The document starts at [`RevisionId::INITIAL`]: whatever the store
+    /// already holds is content, not an edit.
+    pub fn from_store(store: S) -> Self {
+        Self {
+            store,
+            metadata: DocumentMetadata::default(),
+            revision: RevisionId::INITIAL,
+        }
+    }
+
+    /// The whole text.
+    ///
+    /// A contiguous backend answers with a borrowed slice, a chunked backend
+    /// has to materialise the text. The result is a snapshot either way.
+    pub fn text(&self) -> Cow<'_, str> {
+        self.store.text()
+    }
+
+    /// A range of the text, `[start, end)`.
+    ///
+    /// The range is validated against the current text, so an invalid range is
+    /// a `TextError` and never a panic.
+    pub fn text_in(&self, range: TextRange) -> TextResult<Cow<'_, str>> {
+        self.store.text_in(range)
     }
 
     /// Length of the text in UTF-8 bytes.
@@ -74,6 +115,15 @@ impl Document {
     /// Whether `offset` sits on a UTF-8 character boundary.
     pub fn is_char_boundary(&self, offset: TextOffset) -> bool {
         self.store.is_char_boundary(offset)
+    }
+
+    /// The storage backend, read only.
+    ///
+    /// There is deliberately no `store_mut`: a host could change the text
+    /// behind the document's back, and the revision would no longer describe
+    /// the content.
+    pub fn store(&self) -> &S {
+        &self.store
     }
 
     /// The revision of the current text.
@@ -103,7 +153,8 @@ impl Document {
     pub fn is_read_only(&self) -> bool {
         self.metadata.is_read_only()
     }
-
+}
+impl<S: TextStore> Document<S> {
     /// Inserts `text` at `offset`.
     ///
     /// Returns the revision produced by the edit.
@@ -307,7 +358,6 @@ impl Document {
         self.revision
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,5 +952,67 @@ mod tests {
                 .edit_problems(&[TextEdit::insert(TextOffset(3), "x")])
                 .is_empty()
         );
+    }
+
+    // -- generic backend --------------------------------------------------
+
+    #[test]
+    fn a_document_can_be_built_on_a_store() {
+        let mut store = StringTextStore::new();
+        store.insert(TextOffset(0), "Hello").unwrap();
+
+        let mut document = Document::from_store(store);
+
+        assert_eq!(document.text(), "Hello");
+        assert_eq!(document.revision(), RevisionId::INITIAL);
+
+        document.insert(TextOffset(5), "!").unwrap();
+        assert_eq!(document.text(), "Hello!");
+    }
+
+    #[test]
+    fn a_range_of_the_text_can_be_read() {
+        let document = Document::from_text("Hello world");
+
+        assert_eq!(
+            document
+                .text_in(TextRange::new(TextOffset(0), TextOffset(5)))
+                .unwrap(),
+            "Hello"
+        );
+        assert_eq!(
+            document
+                .text_in(TextRange::new(TextOffset(6), TextOffset(11)))
+                .unwrap(),
+            "world"
+        );
+    }
+
+    #[test]
+    fn an_invalid_range_cannot_be_read() {
+        let document = Document::from_text("Hello");
+
+        assert_eq!(
+            document.text_in(TextRange::new(TextOffset(0), TextOffset(99))),
+            Err(TextError::OffsetOutOfRange { offset: 99, len: 5 })
+        );
+        assert_eq!(
+            document.text_in(TextRange::new(TextOffset(3), TextOffset(1))),
+            Err(TextError::InvalidRange { start: 3, end: 1 })
+        );
+    }
+
+    #[test]
+    fn the_whole_text_of_a_contiguous_backend_is_borrowed() {
+        let document = Document::from_text("Hello");
+
+        assert!(matches!(document.text(), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn the_store_is_reachable_for_reading() {
+        let document = Document::from_text("Hello");
+
+        assert_eq!(document.store().len(), 5);
     }
 }
