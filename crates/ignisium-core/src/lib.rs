@@ -21,4 +21,4 @@ pub use edit::{EditProblem, TextEdit};
 pub use error::{TextError, TextResult};
 pub use metadata::DocumentMetadata;
 pub use revision::RevisionId;
-pub use text::{StringTextStore, TextOffset, TextRange, TextStore};
+pub use text::{Rope, RopeTextStore, StringTextStore, TextOffset, TextRange, TextStore};

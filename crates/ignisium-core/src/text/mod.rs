@@ -1,5 +1,7 @@
+mod rope;
 mod store;
 
+pub use rope::{Rope, RopeTextStore};
 pub use store::{StringTextStore, TextStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
