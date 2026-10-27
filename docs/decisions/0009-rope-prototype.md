@@ -92,9 +92,23 @@ instead of 4. The fix is to split a node in the middle, so that every group
 has at least two children. The lesson: **a tree that only grows at one end
 needs a split rule that does not create empty levels.**
 
-Both bugs are the kind that only a test with a structural assertion finds. The
-test that caught them checks the depth of the tree, not the text: the text
-was correct in both cases.
+**An absolute offset where a relative one was needed.** The third bug was
+found by the benchmark of week 9, not by a test: the check for a character
+boundary walked the tree with an absolute offset, while the search for the
+child expected an offset relative to the node. On a tree with one chunk the
+two numbers are the same, so every unit test passed. As soon as the text was
+bigger than one chunk, the check looked in the wrong chunk and reported a
+valid offset as "not on a character boundary". The lesson: **a test that only
+uses one shape of input tests one shape of the data.** The regression test
+that now covers it builds a tree with several levels and checks the chunk
+edges.
+
+All three bugs are the kind that only a test with a structural assertion
+finds, or a benchmark that runs with realistic sizes. In the first two cases
+the text was correct and only the structure or the speed was wrong; in the
+third case the text was right and a valid edit was rejected. The lesson for
+the prototype: **a data structure needs tests on the shape of the structure,
+not only on the result.**
 
 ## Consequences
 
