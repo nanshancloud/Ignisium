@@ -1,15 +1,9 @@
 //! Week 9: the two storage backends, measured without the setup in the timing.
 //!
-//! The Criterion benchmarks of `benches/backends.rs` have a weakness: the
-//! document has to be rebuilt for every iteration, and the rebuild of the
-//! input is part of the measured time. For a contiguous backend that rebuild
-//! is a copy of the whole text, for the rope it is a copy of the whole tree.
-//! The measured times therefore contain a term that has nothing to do with
-//! the operation under test.
-//!
-//! This probe measures the operation itself: the document is built **before**
-//! the timer starts, and only the operation is timed. The numbers here are
-//! the ones the week 10 decision is based on.
+//! The Criterion benchmarks rebuild the input for every iteration, and that
+//! rebuild is part of the measured time: a contiguous backend pays a copy of
+//! the whole text, the rope a copy of the whole tree. This probe builds the
+//! document **before** the timer starts, so only the operation is measured.
 //!
 //! The test is ignored, because it allocates up to 10 MiB and repeats every
 //! measurement. Run it explicitly:

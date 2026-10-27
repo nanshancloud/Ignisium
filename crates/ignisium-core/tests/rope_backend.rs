@@ -1,8 +1,8 @@
 //! Week 9: the rope backend, seen from the outside.
 //!
-//! The rope is the second storage backend. The point of these tests is that
-//! the document layer does not know which backend it is talking to: the same
-//! edits, the same transactions and the same errors have to work on both.
+//! The point of these tests is that the document layer does not know which
+//! backend it is talking to: the same edits, transactions and errors have to
+//! work on both.
 
 use ignisium_core::{
     Document, RopeTextStore, StringTextStore, TextEdit, TextError, TextOffset, TextRange,
@@ -99,9 +99,8 @@ fn a_read_only_rope_document_refuses_edits() {
     );
 }
 
-/// The two backends have to behave the same. The document level rules
-/// (revision, transactions, errors) are backend independent, so the same
-/// sequence of operations has to produce the same text on both.
+/// The two backends have to behave the same: the document level rules
+/// (revision, transactions, errors) are backend independent.
 #[test]
 fn both_backends_produce_the_same_text() {
     let mut rope = rope_document("");

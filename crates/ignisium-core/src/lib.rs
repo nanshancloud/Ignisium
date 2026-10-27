@@ -1,12 +1,6 @@
 //! Ignisium core: a platform independent text editing component.
 //!
-//! The crate currently provides the document model only:
-//!
-//! ```text
-//! Document ──► TextStore ──► StringTextStore ──► String
-//! ```
-//!
-//! Everything a host application needs today is re-exported at the crate root;
+//! Everything a host application needs is re-exported at the crate root; the
 //! internal module layout is not part of the public API.
 
 mod document;

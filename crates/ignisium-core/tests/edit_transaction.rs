@@ -1,9 +1,7 @@
 //! Week 6: edit transactions, seen from the outside.
 //!
 //! The unit tests in `src/document.rs` cover the rules one by one. This file
-//! walks through the situations a host actually runs into: an auto-indent
-//! transaction, several cursors editing at once, a stale batch that must be
-//! rejected as a whole, and text that is not plain ASCII.
+//! walks through the situations a host actually runs into.
 
 use ignisium_core::{
     Document, EditProblem, RevisionId, TextEdit, TextError, TextOffset, TextRange,
@@ -17,11 +15,10 @@ fn range(start: usize, end: usize) -> TextRange {
     TextRange::new(TextOffset(start), TextOffset(end))
 }
 
-/// Pressing enter on an indented line: drop the indentation and put a fresh one
-/// after the newline. One user action, one transaction, one revision.
-///
-/// The batch uses a single `replace`, because an insertion at the same offset
-/// as another edit's range would be rejected as overlapping.
+/// Pressing enter on an indented line: one user action, one transaction,
+/// one revision. The batch uses a single `replace`, because an insertion at
+/// the same offset as another edit's range would be rejected as
+/// overlapping.
 #[test]
 fn auto_indent_is_one_transaction() {
     let mut document = document_with("    return 1;");
@@ -34,9 +31,8 @@ fn auto_indent_is_one_transaction() {
     assert_eq!(revision, RevisionId::INITIAL.next());
 }
 
-/// Several cursors: every edit is written against the text as it was before the
-/// transaction, so the host does not have to shift the offsets of the later
-/// edits while it is building the batch.
+/// Several cursors: every edit is written against the text as it was before
+/// the transaction, so the host does not have to shift offsets.
 #[test]
 fn several_cursors_edit_in_one_transaction() {
     let mut document = document_with("one two three");
@@ -67,8 +63,8 @@ fn deletions_across_the_document() {
     assert_eq!(document.text(), "two");
 }
 
-/// An insertion right behind a removed range is allowed and keeps its meaning:
-/// the offset still refers to the text as it was before the transaction.
+/// An insertion right behind a removed range keeps its meaning: the offset
+/// still refers to the text as it was before the transaction.
 #[test]
 fn an_insertion_after_a_deleted_range() {
     let mut document = document_with("a1b2c");
@@ -83,7 +79,7 @@ fn an_insertion_after_a_deleted_range() {
     assert_eq!(document.text(), "aXb2c");
 }
 
-/// A batch built against an older revision must not be applied half-way: the
+/// A batch built against an older revision is not applied half-way: the
 /// document keeps the old text and the old revision.
 #[test]
 fn a_stale_batch_is_rejected_as_a_whole() {
@@ -136,7 +132,7 @@ fn a_transaction_never_splits_a_character() {
 }
 
 /// The host asks what is wrong before it applies anything, so it can report
-/// every bad edit instead of only the first one.
+/// every bad edit.
 #[test]
 fn a_host_can_inspect_a_batch_before_applying_it() {
     let document = document_with("abc");

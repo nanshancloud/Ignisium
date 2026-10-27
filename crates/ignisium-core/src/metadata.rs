@@ -1,23 +1,12 @@
 /// Document state that is not part of the text itself.
 ///
-/// The text storage layer answers "what are the characters?". This type answers
-/// the few "what kind of document is this?" questions the editing core already
-/// has a use case for. It is deliberately small: a field is only added here when
-/// a caller needs it, so the document state does not accumulate speculative
-/// options that no host can act on.
+/// Deliberately small: a field is only added here when a caller needs it.
+/// Currently `read_only`: the host refuses edits through this document.
 ///
-/// Current fields:
+/// Not here yet: newline and encoding policy (belongs with the line index of
+/// week 13), file name, path and dirty flag (application level).
 ///
-/// - `read_only`: the host refuses edits through this document. Needed for
-///   read-only views and for documents opened as generated output.
-///
-/// Deliberately not here yet:
-///
-/// - newline / encoding policy: belongs with the line index (week 13), and
-///   putting it in the document now would make the storage layer depend on it
-/// - file name, path, dirty flag: application level (IgnisTE), not core
-///
-/// See ADR-0005 for the lifecycle of this type.
+/// See ADR-0005.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DocumentMetadata {
     read_only: bool,
@@ -31,8 +20,7 @@ impl DocumentMetadata {
 
     /// Sets whether edits are refused on the owning document.
     ///
-    /// Toggling this flag is not an edit: it does not change the text and does
-    /// not advance the document revision.
+    /// Toggling this flag is not an edit: it does not advance the revision.
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
     }

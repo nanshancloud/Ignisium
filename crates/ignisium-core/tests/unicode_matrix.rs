@@ -1,16 +1,16 @@
 //! Week 4: Unicode position test matrix.
 //!
-//! The matrix records, for each sample, the numbers that matter when talking
+//! For each sample the matrix records the numbers that matter when talking
 //! about "a position in text":
 //!
-//! - `bytes`: UTF-8 byte length, the unit `TextOffset` counts today
+//! - `bytes`: UTF-8 byte length, the unit `TextOffset` counts
 //! - `chars`: Unicode scalar values (Rust `char`)
 //! - `graphemes`: user-perceived characters (UAX#29)
 //! - `boundaries`: byte offsets that start a scalar value
 //!
 //! `graphemes` cannot be computed with the standard library today, so the
-//! values are recorded by hand. They exist to keep the gap between "what the
-//! storage layer counts" and "what a user sees" visible and tested. See
+//! values are recorded by hand. They keep the gap between "what the storage
+//! layer counts" and "what a user sees" visible and tested. See
 //! `docs/design/text-position.md`.
 
 use ignisium_core::{Document, TextError, TextOffset, TextRange};

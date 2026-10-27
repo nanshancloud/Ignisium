@@ -1,9 +1,7 @@
 //! Week 7: large document scaling probe.
 //!
-//! Criterion answers "which implementation is faster?". This probe answers a
-//! different question: how does the current backend behave as the document
-//! grows? It is the reference point for the long line work (week 12) and for
-//! the storage decision (week 8).
+//! Answers a different question than the Criterion benchmarks: how does the
+//! backend behave as the document grows?
 //!
 //! The test is ignored on purpose: allocating 100 MiB is far too slow for an
 //! ordinary test run. Run it explicitly:

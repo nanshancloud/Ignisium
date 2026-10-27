@@ -7,15 +7,7 @@ use crate::{TextOffset, TextRange};
 ///
 /// Every edit in a batch is expressed against **the text as it was before the
 /// batch started**, not against the intermediate result of the previous edit.
-/// That is what makes a batch expressible in one pass and what makes it
-/// checkable before anything is modified. See ADR-0006.
-///
-/// ```text
-/// text:      "  if x {"
-/// batch:     Delete [0, 2)          indentation
-///            Insert at 2, "\n  "    newline plus indentation
-/// result:    "\n  if x {"
-/// ```
+/// See ADR-0006.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextEdit {
     /// Insert `text` at `offset`.
@@ -62,9 +54,8 @@ impl TextEdit {
 
     /// Whether applying this edit would leave the text unchanged.
     ///
-    /// No-op edits are dropped from a batch before it is validated and applied:
-    /// an edit with no effect has no error and no position to keep clear of the
-    /// other edits.
+    /// No-op edits are dropped from a batch before it is validated: an edit
+    /// with no effect has no error and no position to keep clear.
     pub fn is_noop(&self) -> bool {
         match self {
             TextEdit::Insert { text, .. } => text.is_empty(),
@@ -80,9 +71,8 @@ impl TextEdit {
 
     /// The interval used to detect two edits that fight over the same text.
     ///
-    /// Half-open ranges claim exactly what they span. An insertion claims
-    /// nothing, but it still needs a position no other edit may consume, so it
-    /// claims the single position `offset..offset + 1`.
+    /// An insertion claims nothing, but it still needs a position no other
+    /// edit may consume, so it claims `offset..offset + 1`.
     pub(crate) fn claim(&self) -> TextRange {
         match self {
             TextEdit::Insert { offset, .. } => TextRange::new(*offset, TextOffset(offset.0 + 1)),
@@ -93,8 +83,8 @@ impl TextEdit {
 
 /// A problem found in a batch edit, together with the offending edit.
 ///
-/// `Document::edit_problems` reports every problem it can find, not only the
-/// first one, so a host can highlight all the edits it has to fix.
+/// `Document::edit_problems` reports every problem it can find, so a host can
+/// highlight all the edits it has to fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditProblem {
     /// Index of the edit in the batch it was passed as.

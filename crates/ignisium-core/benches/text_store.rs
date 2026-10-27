@@ -1,19 +1,14 @@
-//! Week 7: benchmarks for the current text storage.
+//! Week 7: benchmarks for the text storage.
 //!
-//! These benchmarks measure the `StringTextStore` backend, the only one that
-//! exists today. Their purpose is not to prove that it is fast, but to give
-//! week 9 and week 10 a baseline: a second backend (Rope) is only worth its
-//! complexity if it beats the numbers measured here.
+//! Every benchmark measures **one operation on a prepared document**. Building
+//! the document is setup work, but note that `iter_batched` rebuilds the input
+//! for every iteration and that rebuild is part of the measured time.
 //!
 //! Run them with:
 //!
 //! ```text
 //! cargo bench --bench text_store
 //! ```
-//!
-//! Every benchmark measures **one edit on a prepared document**. Building the
-//! document is setup work and is not part of the measurement, otherwise the
-//! numbers would describe the allocator rather than the storage layer.
 
 use std::hint::black_box;
 

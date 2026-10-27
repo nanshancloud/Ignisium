@@ -1,26 +1,10 @@
-//! A simplified rope.
+//! A simplified rope: the text as a tree of chunks.
 //!
-//! A rope stores the text as a tree of chunks instead of one contiguous
-//! buffer. The point of the structure is that an edit only touches the chunks
-//! around the edit position, while a read of a range only touches the chunks
-//! of that range.
+//! A B+ tree: the leaves hold the text (at most `MAX_CHUNK` bytes), the
+//! internal nodes hold children, and all leaves sit at the same depth. That
+//! is what keeps the tree logarithmic instead of degenerating into a list.
 //!
-//! This is a prototype: the goal of week 9 is to learn the data structure, not
-//! to ship a production storage layer. The limits are listed in ADR-0009.
-//!
-//! ```text
-//!                Internal
-//!              /    |     \
-//!        Internal  Leaf   Leaf
-//!        /   |     "abc"  "def"
-//!      Leaf  Leaf
-//!     "abc"  "def"
-//! ```
-//!
-//! The shape above is a B+ tree: the leaves hold the text, the internal nodes
-//! hold children, and all leaves sit at the same depth. That is what keeps the
-//! tree logarithmic in the number of chunks, instead of degenerating into a
-//! list.
+//! This is a prototype, its limits are listed in ADR-0009.
 
 use std::borrow::Cow;
 
@@ -99,8 +83,7 @@ impl Node {
 
     /// The child that contains `offset`, and the offset inside that child.
     ///
-    /// An offset at the very end of the text belongs to the last child, so
-    /// that appending extends the last chunk instead of creating an empty one.
+    /// An offset at the very end of the text belongs to the last child.
     fn locate(children: &[Node], offset: usize) -> (usize, usize) {
         let mut start = 0;
 
@@ -189,13 +172,9 @@ impl Node {
                         }
 
                         if children.len() > MAX_BRANCHING {
-                            // The node is full: split it in the middle.
-                            //
-                            // The children are moved, not copied: a clone here
-                            // would copy the whole subtree on every insert.
-                            // An even split also keeps every group of at least
-                            // two children, so a full node never creates a
-                            // one-child level.
+                            // The node is full: split it in the middle. The
+                            // children are moved, not copied, and an even
+                            // split never leaves a group of one behind.
                             let middle = children.len() / 2;
                             let right = children.split_off(middle);
 
@@ -209,9 +188,8 @@ impl Node {
         }
     }
 
-    /// Removes the text in `range`, in local coordinates.
-    ///
-    /// Returns the remaining node and the number of removed bytes.
+    /// Removes the text in `range`, in local coordinates. Returns the
+    /// remaining node and the number of removed bytes.
     fn delete(self, range: TextRange) -> (Option<Node>, usize) {
         match self {
             Node::Leaf { text } => {
@@ -347,15 +325,7 @@ impl Node {
 }
 /// A rope: the text as a tree of chunks.
 ///
-/// The rope is the storage structure the week 8 evaluation selected for the
-/// second backend. This implementation is a prototype; its limits are
-/// documented in ADR-0009.
-///
-/// ```text
-/// rope.insert(TextOffset(0), "Hello");
-/// rope.text();            // "Hello"
-/// rope.text_in(range);    // a range of the text, without copying the rest
-/// ```
+/// A prototype, its limits are documented in ADR-0009.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Rope {
     root: Option<Node>,
@@ -401,9 +371,7 @@ impl Rope {
         out
     }
 
-    /// A range of the text.
-    ///
-    /// Only the chunks that the range touches are copied.
+    /// A range of the text. Only the chunks the range touches are copied.
     pub fn text_in(&self, range: TextRange) -> String {
         let mut out = String::new();
 
@@ -428,10 +396,7 @@ impl Rope {
         }
     }
 
-    /// Inserts `text` at `offset`.
-    ///
-    /// The offset has to be a character boundary. The store validates it
-    /// before it gets here.
+    /// Inserts `text` at `offset`, which has to be a character boundary.
     pub fn insert(&mut self, offset: TextOffset, text: &str) {
         if text.is_empty() {
             return;
@@ -439,7 +404,7 @@ impl Rope {
 
         let mut at = offset.0;
 
-        // A large text is inserted chunk by chunk, so that no leaf ever grows
+        // A large text is inserted chunk by chunk, so that no leaf grows
         // beyond the chunk limit.
         for chunk in chunk_text(text) {
             self.insert_chunk(at, &chunk);
@@ -447,9 +412,7 @@ impl Rope {
         }
     }
 
-    /// Deletes `range`.
-    ///
-    /// The range has to be valid. The store validates it before it gets here.
+    /// Deletes `range`, which has to be valid.
     pub fn delete(&mut self, range: TextRange) {
         let root = match self.root.take() {
             Some(root) => root,
@@ -463,12 +426,8 @@ impl Rope {
     }
     /// Splits the rope into two ropes at `offset`.
     ///
-    /// The left rope holds the text before `offset`, the right rope the text
-    /// from `offset` on.
-    ///
-    /// This is the teaching version: it rebuilds both sides from the chunks,
-    /// which costs O(n). A production rope splits the path to the offset
-    /// instead and keeps the tree (ADR-0009).
+    /// The teaching version: it rebuilds both sides from the chunks, which
+    /// costs O(n) (ADR-0009).
     pub fn split_at(&self, offset: TextOffset) -> (Rope, Rope) {
         let mut leaves: Vec<String> = Vec::new();
 
@@ -517,8 +476,7 @@ impl Rope {
 
     /// The text of `other` appended to this rope.
     ///
-    /// Like [`Rope::split_at`], this is the teaching version: it appends chunk
-    /// by chunk instead of merging the two trees.
+    /// The teaching version: it appends chunk by chunk (ADR-0009).
     pub fn concat(&self, other: &Rope) -> Rope {
         let mut result = self.clone();
         let mut leaves: Vec<String> = Vec::new();
@@ -580,11 +538,6 @@ impl Rope {
     }
 }
 /// A [`TextStore`] backed by a rope.
-///
-/// This is the second storage backend of the core. It exists to prove that the
-/// storage boundary of ADR-0008 really works for a backend that does not keep
-/// the text in one buffer, and to give week 10 a second implementation to
-/// measure against the string backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RopeTextStore {
     rope: Rope,
@@ -621,8 +574,8 @@ impl TextStore for RopeTextStore {
     }
 
     fn text(&self) -> Cow<'_, str> {
-        // A rope cannot hand out a borrowed whole text: the text lives in
-        // many chunks. The caller gets a snapshot instead.
+        // A rope cannot hand out a borrowed whole text: it lives in many
+        // chunks, so the caller gets a snapshot.
         Cow::Owned(self.rope.text())
     }
 
@@ -655,7 +608,7 @@ mod tests {
     use crate::text::StringTextStore;
 
     /// A deterministic pseudo random number generator, so that a failure can
-    /// be reproduced without a dependency.
+    /// be reproduced.
     fn next_random(state: &mut u64) -> u64 {
         *state = state
             .wrapping_mul(6364136223846793005)
@@ -771,9 +724,7 @@ mod tests {
         assert!(!rope.is_char_boundary(TextOffset(7)));
     }
 
-    /// The boundary check has to work on a tree with more than one level. The
-    /// unit tests above only use a single chunk, so they never reach the part
-    /// of the tree where the offset has to be made relative to the node.
+    /// The boundary check has to work on a tree with more than one level.
     #[test]
     fn boundaries_are_found_in_a_tree_with_several_levels() {
         let rope = Rope::from_text(&"a".repeat(64 * MAX_CHUNK));
@@ -794,9 +745,8 @@ mod tests {
         assert!(rope.is_char_boundary(TextOffset(64 * MAX_CHUNK)));
     }
 
-    /// The same, with a text that has multi-byte characters: the bytes inside
-    /// a character are not boundaries, wherever the character sits in the
-    /// tree.
+    /// The same, with multi-byte characters: the bytes inside a character are
+    /// not boundaries, wherever the character sits in the tree.
     #[test]
     fn boundaries_of_multi_byte_text_are_found_in_a_large_tree() {
         // "中" is three bytes, so the chunk edges do not fall on character
@@ -888,9 +838,8 @@ mod tests {
         assert_eq!(joined.len(), 11);
     }
 
-    /// The rope and the string backend have to behave the same. This is the
-    /// test that matters: the rope is only useful if it is a drop-in
-    /// replacement.
+    /// The rope has to behave like the string backend: it is only useful as a
+    /// drop-in replacement.
     #[test]
     fn the_rope_behaves_like_the_string_backend() {
         let mut state = 0x5eed_1234_u64;

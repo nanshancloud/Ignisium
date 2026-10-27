@@ -2,10 +2,8 @@ use std::fmt;
 
 /// Errors produced by fallible text operations.
 ///
-/// Invalid input is reported as a value instead of panicking, so a host
-/// application can decide whether to clamp the offset, show a message or abort
-/// the edit. Panicking would take the whole editor down for what is usually a
-/// recoverable programming or input mistake.
+/// Invalid input is reported as a value instead of panicking, so a host can
+/// clamp the offset, show a message or abort the edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextError {
     /// The offset is past the end of the text.
@@ -22,15 +20,11 @@ pub enum TextError {
     InvalidRange { start: usize, end: usize },
 
     /// The document refuses edits because it is read-only.
-    ///
-    /// This is the first variant that describes document policy rather than
-    /// offset validity, added with the document metadata in week 5 (ADR-0005).
     ReadOnly,
 
     /// Two edits of the same batch claim the same text.
     ///
-    /// `first` and `second` are indexes into the batch that was applied, with
-    /// `first < second`.
+    /// `first` and `second` are indexes into the batch, with `first < second`.
     OverlappingEdits { first: usize, second: usize },
 }
 
@@ -80,7 +74,7 @@ mod tests {
     #[test]
     fn error_can_be_used_as_std_error() {
         // `std::error::Error` makes TextError composable with `?` in code that
-        // returns `Box<dyn Error>`, and usable by error-reporting libraries.
+        // returns `Box<dyn Error>`.
         let error = TextError::OffsetOutOfRange { offset: 9, len: 6 };
         let boxed: Box<dyn std::error::Error> = Box::new(error);
 

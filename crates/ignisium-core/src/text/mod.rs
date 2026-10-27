@@ -17,16 +17,15 @@ impl TextRange {
     /// A half-open range `[start, end)`.
     ///
     /// The endpoints are not validated here: a range is checked against the
-    /// text it is used on, which reports `TextError::InvalidRange` or
-    /// `TextError::OffsetOutOfRange` (ADR-0003).
+    /// text it is used on (ADR-0003).
     pub fn new(start: TextOffset, end: TextOffset) -> Self {
         Self { start, end }
     }
 
     /// Length of the range in UTF-8 bytes, `0` for an inverted range.
     ///
-    /// An inverted range is invalid input rather than a programming error the
-    /// library should panic on, so the subtraction saturates instead.
+    /// An inverted range is invalid input, not a programming error, so the
+    /// subtraction saturates instead.
     pub fn len(&self) -> usize {
         self.end.0.saturating_sub(self.start.0)
     }
@@ -38,8 +37,7 @@ impl TextRange {
     /// Whether two half-open ranges share at least one position.
     ///
     /// Touching ranges do not intersect: `[0, 2)` and `[2, 4)` can both be
-    /// deleted safely. Batch edits use this to reject two edits that claim the
-    /// same text (ADR-0006).
+    /// deleted safely (ADR-0006).
     pub fn intersects(&self, other: &Self) -> bool {
         self.start < other.end && other.start < self.end
     }

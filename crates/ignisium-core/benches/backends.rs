@@ -1,18 +1,19 @@
 //! Week 9: the two storage backends, measured against each other.
 //!
-//! This is the preview of the week 10 comparison. Every operation is measured
-//! on both backends with the same input, in the same build, on the same
-//! machine, so that the numbers can be compared directly.
+//! Every operation is measured on both backends with the same input, in the
+//! same build, on the same machine.
+//!
+//! Note that `iter_batched` rebuilds the input for every iteration and that
+//! rebuild is part of the measured time: a contiguous backend pays a copy of
+//! the whole text, the rope a copy of the whole tree. For the numbers the
+//! week 10 decision is based on, use `tests/backend_probe.rs`, which builds
+//! the document before the timer starts.
 //!
 //! Run it with:
 //!
 //! ```text
 //! cargo bench --bench backends
 //! ```
-//!
-//! The rules of `docs/benchmark/benchmark-requirements.md` apply: one
-//! operation per measurement, preparation is not measured, release build
-//! only, and the numbers are only comparable within one machine.
 
 use std::hint::black_box;
 

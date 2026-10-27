@@ -2,15 +2,13 @@ use std::fmt;
 
 /// Identifies one state of a `Document`.
 ///
-/// Offsets and ranges are only meaningful together with the revision they were
-/// computed against: an edit in front of a position shifts it. A host that
-/// caches a position, a search result or a styling run pairs it with the
-/// `RevisionId` it was computed from and can then tell whether the cache entry
-/// is still valid. See ADR-0005.
+/// Offsets are only meaningful together with the revision they were computed
+/// against: an edit in front of a position shifts it. A host that caches a
+/// position or a search result pairs it with the `RevisionId` it was computed
+/// from and can then tell whether the cache entry is still valid.
 ///
-/// The revision counter starts at [`RevisionId::INITIAL`], which is the state
-/// of a freshly created or freshly loaded document. Loading content is not an
-/// edit, so it does not advance the counter.
+/// The counter starts at [`RevisionId::INITIAL`]; loading content is not an
+/// edit, so it does not advance the counter. See ADR-0005.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct RevisionId(u64);
 
@@ -25,10 +23,8 @@ impl RevisionId {
 
     /// The revision that follows `self`.
     ///
-    /// The counter saturates instead of wrapping. Reaching the limit would
-    /// require 2^64 mutations, so saturation is unreachable in practice; it only
-    /// guarantees the counter never jumps back to a value an older cache entry
-    /// may already use.
+    /// The counter saturates instead of wrapping, so it never jumps back to a
+    /// value an older cache entry may already use.
     pub fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }

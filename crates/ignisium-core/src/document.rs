@@ -9,30 +9,17 @@ use crate::{TextOffset, TextRange};
 
 /// A text document.
 ///
-/// `Document` does not touch `String` directly. It talks to the storage layer
-/// through `TextStore` so the backend can be replaced later.
-///
-/// Since v0.3 a document is three things (ADR-0005):
-///
-/// ```text
-/// Document
-///    │
-///    ├── store     StringTextStore   the characters
-///    ├── metadata  DocumentMetadata  how the host wants it treated
-///    └── revision  RevisionId        which state the characters are in
-/// ```
+/// The document is three things (ADR-0005): the characters in a [`TextStore`],
+/// the metadata that says how the host wants the document treated, and the
+/// revision that says which state the characters are in.
 ///
 /// Editing operations return `TextResult<RevisionId>`: invalid offsets are
-/// reported as `TextError`, never as a panic (ADR-0003), and a successful edit
-/// reports the revision it produced.
+/// reported as `TextError`, never as a panic (ADR-0003). Several edits can be
+/// applied as one atomic transaction through [`Document::apply_edits`]
+/// (ADR-0006).
 ///
-/// Since v0.5 several edits can be applied as one atomic transaction through
-/// [`Document::apply_edits`], which advances the revision once no matter how
-/// many edits it contains. See ADR-0006.
-///
-/// Since v0.6 the document is generic over its storage backend
-/// (`Document<S: TextStore>`), so a second backend can be used through the
-/// same document API. See ADR-0008.
+/// The document is generic over its storage backend, so a second backend can
+/// be used through the same API (ADR-0008).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document<S: TextStore = StringTextStore> {
     store: S,
@@ -58,13 +45,12 @@ impl Document<StringTextStore> {
 
     /// Creates a document holding `text`.
     ///
-    /// The document starts at [`RevisionId::INITIAL`]: loading content is not an
-    /// edit, so consumers may treat revision 0 as "nothing cached yet".
+    /// The document starts at [`RevisionId::INITIAL`]: loading content is not
+    /// an edit.
     pub fn from_text(text: &str) -> Self {
         let mut document = Self::new();
 
-        // `text` is a whole `&str`, so offset 0 of an empty document is always
-        // a valid insertion point and this cannot fail.
+        // Inserting at offset 0 into an empty document cannot fail.
         document
             .store
             .insert(TextOffset(0), text)
@@ -77,8 +63,8 @@ impl Document<StringTextStore> {
 impl<S: TextStore> Document<S> {
     /// Creates a document on top of an existing store.
     ///
-    /// The document starts at [`RevisionId::INITIAL`]: whatever the store
-    /// already holds is content, not an edit.
+    /// The document starts at [`RevisionId::INITIAL`]: the content of the
+    /// store is not an edit.
     pub fn from_store(store: S) -> Self {
         Self {
             store,
@@ -90,15 +76,14 @@ impl<S: TextStore> Document<S> {
     /// The whole text.
     ///
     /// A contiguous backend answers with a borrowed slice, a chunked backend
-    /// has to materialise the text. The result is a snapshot either way.
+    /// has to materialise the text.
     pub fn text(&self) -> Cow<'_, str> {
         self.store.text()
     }
 
     /// A range of the text, `[start, end)`.
     ///
-    /// The range is validated against the current text, so an invalid range is
-    /// a `TextError` and never a panic.
+    /// An invalid range is a `TextError`, never a panic.
     pub fn text_in(&self, range: TextRange) -> TextResult<Cow<'_, str>> {
         self.store.text_in(range)
     }
@@ -119,9 +104,8 @@ impl<S: TextStore> Document<S> {
 
     /// The storage backend, read only.
     ///
-    /// There is deliberately no `store_mut`: a host could change the text
-    /// behind the document's back, and the revision would no longer describe
-    /// the content.
+    /// There is deliberately no `store_mut`: the revision would no longer
+    /// describe the content.
     pub fn store(&self) -> &S {
         &self.store
     }
@@ -138,8 +122,7 @@ impl<S: TextStore> Document<S> {
 
     /// Mutable access to the metadata, for example to toggle `read_only`.
     ///
-    /// Changing metadata does not change the text, so it does not advance the
-    /// revision.
+    /// Metadata changes do not advance the revision.
     pub fn metadata_mut(&mut self) -> &mut DocumentMetadata {
         &mut self.metadata
     }
@@ -187,27 +170,17 @@ impl<S: TextStore> Document<S> {
     /// All offsets in the batch are interpreted against the text as it was when
     /// `apply_edits` was called. The rules are:
     ///
-    /// - **All or nothing.** Every edit is validated first. If any edit is
-    ///   invalid, the text is left exactly as it was and the first problem is
-    ///   returned. Use [`Document::edit_problems`] to see all of them.
-    /// - **No overlap.** Two edits may not claim the same text. Ranges must not
-    ///   intersect, and an insertion may not sit inside a range that another
-    ///   edit removes. Combine two edits on the same spot into a single
-    ///   [`TextEdit::replace`].
-    /// - **One revision.** A transaction advances the revision exactly once,
-    ///   however many edits it contains.
-    /// - **No work, no revision.** Edits that would change nothing (inserting
-    ///   `""`, deleting an empty range) are dropped before anything is
-    ///   validated, so a batch never fails because of an edit with no effect.
+    /// - **All or nothing.** If any edit is invalid, the text is left as it
+    ///   was and the first problem is returned. Use
+    ///   [`Document::edit_problems`] to see all of them.
+    /// - **No overlap.** Two edits may not claim the same text. Combine two
+    ///   edits on the same spot into a single [`TextEdit::replace`].
+    /// - **One revision.** A transaction advances the revision exactly once.
+    /// - **No work, no revision.** Edits that would change nothing are dropped
+    ///   before anything is validated.
     ///
     /// Edits are applied from the end of the document towards the start, so an
     /// edit never moves the text another edit still has to touch.
-    ///
-    /// ```text
-    /// text:  "  if x {"
-    /// edits: Delete [0, 2), Insert at 2 "\n  "
-    /// after: "\n  if x {"   (one transaction, one new revision)
-    /// ```
     pub fn apply_edits(&mut self, edits: &[TextEdit]) -> TextResult<RevisionId> {
         self.guard_writable()?;
 
@@ -226,13 +199,8 @@ impl<S: TextStore> Document<S> {
         }
 
         // Back to front, so that every edit still sees the coordinates it was
-        // written with:
-        //
-        // - higher offsets first, since they do not move lower ones;
-        // - at the same offset, ranges before insertions, so a range removes
-        //   the original bytes instead of the bytes just inserted there;
-        // - at the same offset and kind, in reverse batch order, because
-        //   inserting at one offset pushes previous text aside.
+        // written with: higher offsets first, at the same offset ranges before
+        // insertions, and at the same offset and kind in reverse batch order.
         ordered.sort_by(|(left_index, left), (right_index, right)| {
             right
                 .span()
@@ -252,16 +220,8 @@ impl<S: TextStore> Document<S> {
     /// Reports every problem with `edits`, without touching the text.
     ///
     /// The problems are returned in batch order. An empty result means the
-    /// batch can be applied to the current text.
-    ///
-    /// This checks the edits against the text only. Whether the document
-    /// accepts edits at all (`read_only`) is answered by `apply_edits`.
-    ///
-    /// ```text
-    /// text:  "abc"
-    /// edits: Insert at 1 "x", Delete [0, 9)
-    /// result: [EditProblem { index: 1, error: OffsetOutOfRange { .. } }]
-    /// ```
+    /// batch can be applied. Whether the document accepts edits at all
+    /// (`read_only`) is answered by `apply_edits`.
     pub fn edit_problems(&self, edits: &[TextEdit]) -> Vec<EditProblem> {
         let effective: Vec<(usize, &TextEdit)> = edits
             .iter()
@@ -298,7 +258,6 @@ impl<S: TextStore> Document<S> {
             TextEdit::Insert { offset, text } => self.store.insert(*offset, text)?,
             TextEdit::Delete { range } => self.store.delete(*range)?,
             TextEdit::Replace { range, text } => {
-                // The range was validated against the text as it was, and
                 // `range.start` stays a character boundary after the removal.
                 self.store.delete(*range)?;
                 self.store.insert(range.start, text)?;
@@ -339,11 +298,7 @@ impl<S: TextStore> Document<S> {
         }
     }
 
-    /// Read-only is document policy, not offset policy.
-    ///
-    /// Offset and range validation belongs to the storage layer (ADR-0003); this
-    /// check belongs to the document because the store knows nothing about how
-    /// the host wants to treat the document.
+    /// Read-only is document policy, not offset policy (ADR-0003).
     fn guard_writable(&self) -> TextResult<()> {
         if self.metadata.is_read_only() {
             return Err(TextError::ReadOnly);

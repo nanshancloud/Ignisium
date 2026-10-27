@@ -5,21 +5,17 @@ use crate::{TextOffset, TextRange};
 
 /// Abstraction over the underlying text storage.
 ///
-/// `TextStore` is intentionally small. It only describes the operations the
-/// editor core needs today, so future backends (Rope, Piece Table, Gap Buffer,
-/// Chunked storage) can be added without changing `Document`.
+/// `TextStore` only describes the operations the editor core needs, so that
+/// other backends (Rope, Piece Table, Gap Buffer) can be added without
+/// changing `Document`.
 ///
-/// All offsets are UTF-8 byte offsets. See ADR-0001.
+/// All offsets are UTF-8 byte offsets (ADR-0001). Mutating operations are
+/// fallible: invalid input becomes a `TextError` instead of a panic
+/// (ADR-0003).
 ///
-/// v0.2: mutating operations are fallible. Offsets are validated before the
-/// backend is touched, so invalid input becomes a `TextError` instead of a
-/// panic. See ADR-0003.
-///
-/// v0.3: the whole text and any range of it can be read without knowing how
-/// the text is stored. A contiguous backend answers with a borrowed slice, a
-/// backend that keeps the text in chunks answers with an owned string. The
-/// trait asks for the *text*, never for chunks, so the storage layout stays
-/// behind the boundary. See ADR-0008.
+/// The trait reads text and ranges, never chunks: a contiguous backend answers
+/// with a borrowed slice, a chunked backend with an owned string, and the
+/// storage layout stays behind the boundary (ADR-0008).
 pub trait TextStore {
     /// Length of the stored text in UTF-8 bytes.
     fn len(&self) -> usize;
@@ -32,14 +28,12 @@ pub trait TextStore {
     ///
     /// The result is a snapshot, not a view: a backend that stores the text in
     /// chunks has to materialise it. Callers that only need a part of the text
-    /// should use [`TextStore::text_in`], which stays proportional to the
-    /// range that is asked for.
+    /// should use [`TextStore::text_in`].
     fn text(&self) -> Cow<'_, str>;
 
     /// A range of the text, `[start, end)`.
     ///
-    /// The range is validated before it is read, so an invalid range is a
-    /// `TextError` and never a panic.
+    /// An invalid range is a `TextError`, never a panic.
     fn text_in(&self, range: TextRange) -> TextResult<Cow<'_, str>>;
 
     fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()>;
@@ -49,12 +43,11 @@ pub trait TextStore {
     /// Whether `offset` sits on a UTF-8 character boundary.
     ///
     /// An offset past the end of the text is not a boundary. Backends answer
-    /// this without materialising the text, which matters for chunked
-    /// backends: the check has to stay cheap, because every edit goes through
+    /// this without materialising the text, because every edit goes through
     /// it.
     fn is_char_boundary(&self, offset: TextOffset) -> bool;
 
-    /// Reject offsets that are past the end or inside a multi-byte character.
+    /// Rejects offsets that are past the end or inside a multi-byte character.
     ///
     /// Shared by every backend: validation rules belong to the offset model,
     /// not to a specific storage implementation.
@@ -105,8 +98,7 @@ impl StringTextStore {
     /// The text as a borrowed slice.
     ///
     /// Only a contiguous backend can offer this without copying, so it is an
-    /// inherent method and not part of the trait: the generic API is
-    /// [`TextStore::text`] and [`TextStore::text_in`].
+    /// inherent method and not part of the trait.
     pub fn as_str(&self) -> &str {
         &self.text
     }
@@ -141,8 +133,7 @@ impl TextStore for StringTextStore {
 
     fn is_char_boundary(&self, offset: TextOffset) -> bool {
         // `str::is_char_boundary` panics for an index past the end, and this
-        // method is public: an offset from a host must not be able to take the
-        // process down.
+        // method is public.
         offset.0 <= self.text.len() && self.text.is_char_boundary(offset.0)
     }
 }
