@@ -18,7 +18,7 @@
 use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use ignisium_core::{Document, TextOffset, TextRange};
+use ignisium_core::{Document, TextEdit, TextOffset, TextRange};
 
 const KIB: usize = 1024;
 const MIB: usize = 1024 * 1024;
@@ -167,12 +167,94 @@ fn bench_large_document(c: &mut Criterion) {
     group.finish();
 }
 
+/// Copying the whole text: the snapshot a background task would take.
+fn bench_snapshot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("snapshot");
+
+    for size in SIZES {
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+            b.iter_batched(
+                || Document::from_text(&ascii(size)),
+                |document| {
+                    let copy = document.text().into_owned();
+
+                    black_box(copy.len());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+/// Applying a batch of edits as one transaction (ADR-0006).
+fn bench_transaction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transaction");
+
+    for size in SIZES {
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+            b.iter_batched(
+                || Document::from_text(&ascii(size)),
+                |mut document| {
+                    let middle = size / 2;
+
+                    document
+                        .apply_edits(&[
+                            TextEdit::insert(TextOffset(middle), "x"),
+                            TextEdit::insert(TextOffset(middle + 1), "y"),
+                            TextEdit::insert(TextOffset(middle + 2), "z"),
+                        ])
+                        .unwrap();
+
+                    black_box(document.text().len());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+/// Reading a range of the text, the way a viewport or a search window would.
+fn bench_read_range(c: &mut Criterion) {
+    let mut group = c.benchmark_group("read_range");
+
+    for size in SIZES {
+        group.throughput(Throughput::Bytes((size / 10) as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+            b.iter_batched(
+                || Document::from_text(&ascii(size)),
+                |document| {
+                    let start = TextOffset(size / 2);
+                    let end = TextOffset(size / 2 + size / 10);
+
+                    let range = document.text_in(TextRange::new(start, end)).unwrap();
+
+                    black_box(range.len());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
 criterion_group!(
     benches,
     bench_append,
     bench_middle_insert,
     bench_delete,
     bench_unicode,
-    bench_large_document
+    bench_large_document,
+    bench_snapshot,
+    bench_transaction,
+    bench_read_range
 );
 criterion_main!(benches);

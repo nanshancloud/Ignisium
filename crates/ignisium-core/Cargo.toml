@@ -11,3 +11,7 @@ criterion = "0.8"
 [[bench]]
 name = "text_store"
 harness = false
+
+[[bench]]
+name = "backends"
+harness = false
