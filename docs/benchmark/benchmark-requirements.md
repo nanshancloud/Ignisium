@@ -58,9 +58,13 @@ not the same character count.
 
 1. **One operation per measurement.** A benchmark measures a single edit, a
    single read or a single lookup on a prepared document.
-2. **Preparation is not measured.** Building the document is setup. Criterion's
-   `iter_batched` is used for that; the scaling probe builds the document
-   before the timer starts.
+2. **Preparation is not measured.** Building the document is setup. For the
+   Criterion benchmarks this is a trap: `iter_batched` with
+   `BatchSize::SmallInput` rebuilds the input for every iteration, and that
+   rebuild is part of the measured time. A contiguous backend pays a copy of
+   the whole text, a rope pays a copy of the whole tree. Where the two
+   backends are compared, the measurement uses a probe that builds the
+   document before the timer starts (`tests/backend_probe.rs`).
 3. **Release profile only.** Debug numbers are not comparable with release
    numbers and are not published.
 4. **Same machine, same session.** Numbers from different machines are not
@@ -119,7 +123,8 @@ Every benchmark run that leads to a decision is recorded as a document in
 docs/benchmark/
 ├── benchmark-requirements.md   this document
 ├── baseline-week07.md          the string backend baseline
-├── rope-week10.md              the comparison of the two backends (planned)
+├── rope-preview-week09.md      the first comparison of the two backends
+├── rope-week10.md              the decision (planned)
 └── long-line-week12.md         the single line scenario (planned)
 ```
 
