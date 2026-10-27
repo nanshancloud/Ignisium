@@ -313,7 +313,9 @@ impl Node {
         match self {
             Node::Leaf { text } => text.is_char_boundary(offset - start),
             Node::Internal { children, .. } => {
-                let (index, _) = Node::locate(children, offset);
+                // `locate` works on coordinates relative to the node, so the
+                // absolute offset has to be made relative first.
+                let (index, _) = Node::locate(children, offset - start);
                 let child_start = start + children[..index].iter().map(Node::len).sum::<usize>();
 
                 children[index].boundary_at(offset, child_start)
@@ -767,6 +769,52 @@ mod tests {
         assert!(!rope.is_char_boundary(TextOffset(1)));
         assert!(!rope.is_char_boundary(TextOffset(2)));
         assert!(!rope.is_char_boundary(TextOffset(7)));
+    }
+
+    /// The boundary check has to work on a tree with more than one level. The
+    /// unit tests above only use a single chunk, so they never reach the part
+    /// of the tree where the offset has to be made relative to the node.
+    #[test]
+    fn boundaries_are_found_in_a_tree_with_several_levels() {
+        let rope = Rope::from_text(&"a".repeat(64 * MAX_CHUNK));
+
+        assert!(rope.depth() > 2, "the tree should have several levels");
+
+        // Every chunk edge is a character boundary, and in ASCII text every
+        // other offset is one too.
+        for chunk in 0..64 {
+            let edge = chunk * MAX_CHUNK;
+
+            assert!(rope.is_char_boundary(TextOffset(edge)));
+            assert!(rope.is_char_boundary(TextOffset(edge + MAX_CHUNK)));
+        }
+
+        assert!(rope.is_char_boundary(TextOffset(MAX_CHUNK + 1)));
+        assert!(rope.is_char_boundary(TextOffset(32 * MAX_CHUNK)));
+        assert!(rope.is_char_boundary(TextOffset(64 * MAX_CHUNK)));
+    }
+
+    /// The same, with a text that has multi-byte characters: the bytes inside
+    /// a character are not boundaries, wherever the character sits in the
+    /// tree.
+    #[test]
+    fn boundaries_of_multi_byte_text_are_found_in_a_large_tree() {
+        // "中" is three bytes, so the chunk edges do not fall on character
+        // boundaries.
+        let rope = Rope::from_text(&"中".repeat(40 * MAX_CHUNK));
+
+        assert!(rope.depth() > 2, "the tree should have several levels");
+
+        let middle = rope.len() / 2;
+
+        assert!(rope.is_char_boundary(TextOffset(0)));
+        assert!(rope.is_char_boundary(TextOffset(middle / 3 * 3)));
+        assert!(rope.is_char_boundary(TextOffset(middle)));
+        assert!(rope.is_char_boundary(TextOffset(rope.len())));
+
+        assert!(!rope.is_char_boundary(TextOffset(1)));
+        assert!(!rope.is_char_boundary(TextOffset(middle + 1)));
+        assert!(!rope.is_char_boundary(TextOffset(middle + 2)));
     }
     #[test]
     fn a_large_text_is_stored_in_chunks() {
