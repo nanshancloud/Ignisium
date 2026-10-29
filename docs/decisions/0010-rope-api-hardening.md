@@ -163,6 +163,9 @@ Two changes to `Node::delete`:
 
 ## What is still open
 
+The gaps below are tracked, with the week that has to answer each of them, in
+`docs/design/open-design-gaps.md` (G1, G2, G3, G5, G6, G7, G8).
+
 - **Does `Rope` stay public?** It is exported at the crate root, which is in
   tension with ADR-0008s promise that the storage layout is invisible to
   hosts. Week 10 decides between "public and safe" (what this record makes

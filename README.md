@@ -44,9 +44,13 @@ layout, rendering and platform abstraction.
 | Path | Content |
 |---|---|
 | `docs/decisions/` | architecture decision records (ADR) |
-| `docs/design/` | design documents: text position model, text storage evaluation |
+| `docs/design/` | design documents: text position model, text storage evaluation, open design gaps |
 | `docs/benchmark/` | benchmark requirements and published results |
 | `docs/dependencies/` | third-party dependency records |
+
+`docs/design/open-design-gaps.md` lists the questions the design does not
+answer yet, each with the week that has to answer it, so that a later module
+does not rediscover them as a defect.
 
 ## Development
 
