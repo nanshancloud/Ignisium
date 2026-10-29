@@ -104,6 +104,7 @@ all of the following on the `medium`, `large` and `huge` sizes:
 |---|---|
 | S2 middle insert | not more than 10x the time of a small document |
 | S1 append | not more than 10x the time of a small document |
+| S8 read_range | not more than 10x the `StringTextStore` time for the same range |
 | S6 snapshot | at most 1.1x the document size in additional memory |
 | S9 line lookup | O(log n) in the number of lines |
 | Unicode | no penalty beyond the byte count |
@@ -113,6 +114,15 @@ The "10x" thresholds encode the actual requirement: an operation must not
 cost more than a constant factor of the document size. A backend that copies
 the whole document for a one byte edit fails this, no matter how fast the
 machine is.
+
+**S8 was added after week 9.** The first comparison showed the rope reading a
+tenth of a 10 MiB document in 611 us against 400 ns for the string backend,
+because `text_in` returns owned text for a chunked backend and a borrowed
+slice for a contiguous one. Without this row a backend could pass every other
+requirement while being about 1500 times slower at the operation a viewport
+performs most often. Measuring S8 as a scenario (rather than trusting the
+asymptotics) is what made the difference visible; see
+`docs/design/open-design-gaps.md` G1 for the candidate fix.
 
 ## 7. Reporting
 

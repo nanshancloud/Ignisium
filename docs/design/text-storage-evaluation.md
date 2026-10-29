@@ -221,3 +221,24 @@ See ADR-0007. In short:
 - A host that only ever edits small documents: then the string backend stays
   the only backend, and `TextStore` is reshaped only far enough to keep the
   option open.
+
+## Postscript: what week 9 measured
+
+The table above is the design-time estimate. Week 9 built the prototype and
+measured it (`docs/benchmark/rope-preview-week09.md`), and one row has to be
+read with that data in hand:
+
+| Row | Estimate here | Measured |
+|---|---|---|
+| Rope, reading a range | `O(log n + range)` | correct in the number of chunks it touches, but it **copies** the range, while a contiguous backend hands out a slice |
+
+Reading a tenth of a 10 MiB document: 400 ns for `StringTextStore`, 611 us for
+`RopeTextStore`. The estimate was about the tree, not about the copy that
+ADR-0008's "return text, never chunks" rule forces - which is why the range
+read is now a design gap of its own (G1 in
+`docs/design/open-design-gaps.md`) rather than a footnote.
+
+The rest of the estimate held: edits became flat (2067 us to 1.5 us for a one
+byte append on 10 MiB), small documents got slower (about 8x at 1 KiB), and the
+snapshot did not improve, because the prototype copies its nodes instead of
+sharing them.
