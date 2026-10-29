@@ -128,6 +128,21 @@ fn both_backends_produce_the_same_text() {
     assert_eq!(rope.text_in(range).unwrap(), string.text_in(range).unwrap());
 }
 
+/// The no-op rule is a document rule, not a backend rule: it has to hold on
+/// the rope too (ADR-0010).
+#[test]
+fn an_empty_edit_does_not_advance_the_revision_on_a_rope() {
+    let mut document = rope_document("abc");
+
+    assert_eq!(document.insert(TextOffset(1), ""), Ok(document.revision()));
+    assert_eq!(
+        document.delete(TextRange::new(TextOffset(1), TextOffset(1))),
+        Ok(document.revision())
+    );
+    assert_eq!(document.text(), "abc");
+    assert_eq!(document.revision().as_u64(), 0);
+}
+
 #[test]
 fn the_chunk_layout_is_visible_through_the_store() {
     let store = RopeTextStore::from_text(&"a".repeat(5000));
