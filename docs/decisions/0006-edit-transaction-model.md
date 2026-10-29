@@ -134,15 +134,22 @@ error and no position to protect: a batch never fails because of an edit that
 would not have done anything. This keeps one rule true for the whole batch:
 what is validated is what is applied.
 
-### 6. `replace` is a one-edit transaction
+### 6. Every single edit is a one-edit transaction
 
 ```rust
+pub fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<RevisionId>;
+pub fn delete(&mut self, range: TextRange) -> TextResult<RevisionId>;
 pub fn replace(&mut self, range: TextRange, text: &str) -> TextResult<RevisionId>;
 ```
 
 `replace` with an empty string is a delete; `replace` over an empty range is an
 insertion. It goes through `apply_edits`, so single edits and batches cannot
 diverge in validation, ordering or revision behaviour.
+
+**Amended by ADR-0010:** `insert` and `delete` do the same. Before that they
+called the store directly, which gave the same text but not the same rules: an
+empty insert advanced the revision while the equivalent one-edit transaction
+did not. Rule 5 ("no work, no revision") now holds for every entry point.
 
 ## Consequences
 

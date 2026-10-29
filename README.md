@@ -29,9 +29,10 @@ Document<S> ──► TextStore ──► StringTextStore ──► String
 | `TextStore` | storage abstraction with a range based reading API (ADR-0002, ADR-0008) |
 | `TextError` | fallible text operations, no panics on invalid input (ADR-0003) |
 | `Document<S>` | storage, metadata and revision, generic over the backend (ADR-0005, ADR-0008) |
-| `TextEdit` | atomic edit transactions, batch validation (ADR-0006) |
+| `TextEdit` | atomic edit transactions; every single edit is a one-edit transaction (ADR-0006, ADR-0010) |
 | `StringTextStore` | the default backend, one contiguous buffer |
 | `RopeTextStore` | rope prototype, a tree of chunks, second backend (ADR-0009) |
+| `Rope` | public rope type, every positional method fallible (ADR-0010) |
 | Benchmarks | Criterion suite, a scaling probe and a backend comparison probe |
 | Storage decision | the rope wins on large documents, the decision is week 10 (ADR-0007) |
 

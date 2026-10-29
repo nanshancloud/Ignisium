@@ -136,6 +136,19 @@ not only on the result.**
 | No snapshot support | a background task cannot hold a stable view | share the nodes with `Rc`/`Arc` |
 | Text is copied per chunk | a snapshot costs the whole text | share the nodes between snapshots |
 
+Two rows were removed by ADR-0010:
+
+- "The public API does not validate its input" - every positional `Rope`
+  method now returns a `TextResult` and validates before it touches a chunk.
+- "An empty internal node would panic in `locate`" - `Node::internal` and
+  `Node::locate` assert the invariant where it is created and where it is
+  read.
+
+One row was corrected: the delete path was never O(n) in the size of the
+tree, because the recursion only descends into the children the range
+touches. ADR-0010 added the early exit that makes that visible in the code
+and collapses a node left with a single child.
+
 ## Lifecycle
 
 | Item | Lifecycle | Notes |
