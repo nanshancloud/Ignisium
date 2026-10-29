@@ -4,6 +4,50 @@ mod store;
 pub use rope::{Rope, RopeTextStore};
 pub use store::{StringTextStore, TextStore};
 
+use crate::error::{TextError, TextResult};
+
+/// Rejects an offset that is past the end or inside a multi-byte character.
+///
+/// The single implementation of the offset rules (ADR-0001, ADR-0003). The
+/// `TextStore` default methods and the rope both use it, so a backend cannot
+/// drift from the position model.
+pub(crate) fn validate_offset(len: usize, boundary: bool, offset: TextOffset) -> TextResult<()> {
+    if offset.0 > len {
+        return Err(TextError::OffsetOutOfRange {
+            offset: offset.0,
+            len,
+        });
+    }
+
+    if !boundary {
+        return Err(TextError::NotCharBoundary { offset: offset.0 });
+    }
+
+    Ok(())
+}
+
+/// Rejects a range whose endpoints are inverted or invalid.
+///
+/// Both endpoints are checked, so an inverted range is reported as
+/// `InvalidRange` before its endpoints are looked at.
+pub(crate) fn validate_range(
+    len: usize,
+    range: TextRange,
+    is_boundary: impl Fn(TextOffset) -> bool,
+) -> TextResult<()> {
+    if range.start.0 > range.end.0 {
+        return Err(TextError::InvalidRange {
+            start: range.start.0,
+            end: range.end.0,
+        });
+    }
+
+    validate_offset(len, is_boundary(range.start), range.start)?;
+    validate_offset(len, is_boundary(range.end), range.end)?;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TextOffset(pub usize);
 

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use crate::error::{TextError, TextResult};
+use super::{validate_offset, validate_range};
+use crate::error::TextResult;
 use crate::{TextOffset, TextRange};
 
 /// Abstraction over the underlying text storage.
@@ -49,38 +50,15 @@ pub trait TextStore {
 
     /// Rejects offsets that are past the end or inside a multi-byte character.
     ///
-    /// Shared by every backend: validation rules belong to the offset model,
-    /// not to a specific storage implementation.
+    /// Validation rules belong to the offset model, not to a storage
+    /// implementation, so every backend shares this one.
     fn validate_offset(&self, offset: TextOffset) -> TextResult<()> {
-        let len = self.len();
-
-        if offset.0 > len {
-            return Err(TextError::OffsetOutOfRange {
-                offset: offset.0,
-                len,
-            });
-        }
-
-        if !self.is_char_boundary(offset) {
-            return Err(TextError::NotCharBoundary { offset: offset.0 });
-        }
-
-        Ok(())
+        validate_offset(self.len(), self.is_char_boundary(offset), offset)
     }
 
-    /// Reject ranges whose endpoints are inverted or invalid.
+    /// Rejects ranges whose endpoints are inverted or invalid.
     fn validate_range(&self, range: TextRange) -> TextResult<()> {
-        if range.start.0 > range.end.0 {
-            return Err(TextError::InvalidRange {
-                start: range.start.0,
-                end: range.end.0,
-            });
-        }
-
-        self.validate_offset(range.start)?;
-        self.validate_offset(range.end)?;
-
-        Ok(())
+        validate_range(self.len(), range, |offset| self.is_char_boundary(offset))
     }
 }
 
@@ -93,6 +71,16 @@ pub struct StringTextStore {
 impl StringTextStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A store holding `text`.
+    ///
+    /// This is loading, not editing: a `&str` is valid UTF-8 by construction,
+    /// so there is nothing to validate and nothing to fail.
+    pub fn from_text(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+        }
     }
 
     /// The text as a borrowed slice.
@@ -140,6 +128,7 @@ impl TextStore for StringTextStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::TextError;
 
     #[test]
     fn new_store_is_empty() {
@@ -148,6 +137,15 @@ mod tests {
         assert_eq!(store.as_str(), "");
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn a_store_can_be_loaded_with_text() {
+        let store = StringTextStore::from_text("你好");
+
+        assert_eq!(store.as_str(), "你好");
+        assert_eq!(store.len(), 6);
+        assert!(matches!(store.text(), Cow::Borrowed(_)));
     }
 
     #[test]

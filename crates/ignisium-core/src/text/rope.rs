@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 
-use super::TextStore;
+use super::{TextStore, validate_offset, validate_range};
 use crate::error::TextResult;
 use crate::{TextOffset, TextRange};
 
@@ -56,7 +56,16 @@ impl Node {
     }
 
     /// Builds an internal node from its children.
+    ///
+    /// An internal node always has at least one child; an empty one would be
+    /// a level without content. Every constructor goes through here, so the
+    /// invariant is checked once, where it is created.
     fn internal(children: Vec<Node>) -> Node {
+        assert!(
+            !children.is_empty(),
+            "an internal node always has at least one child"
+        );
+
         let len = children.iter().map(Node::len).sum();
 
         Node::Internal { children, len }
@@ -84,7 +93,16 @@ impl Node {
     /// The child that contains `offset`, and the offset inside that child.
     ///
     /// An offset at the very end of the text belongs to the last child.
+    ///
+    /// `children` is never empty: see [`Node::internal`]. The assertion is a
+    /// programming error check, not input validation - a host can never reach
+    /// it, because `Rope` validates every offset before it looks at the tree.
     fn locate(children: &[Node], offset: usize) -> (usize, usize) {
+        assert!(
+            !children.is_empty(),
+            "an internal node always has at least one child"
+        );
+
         let mut start = 0;
 
         for (index, child) in children.iter().enumerate() {
@@ -212,16 +230,25 @@ impl Node {
                 let mut kept: Vec<Node> = Vec::with_capacity(children.len());
                 let mut start = 0;
                 let mut removed = 0;
+                let mut rest = children.into_iter();
 
-                for child in children {
+                while let Some(child) = rest.next() {
                     let child_len = child.len();
                     let child_start = start;
+
+                    // Everything behind the range is untouched, so the walk
+                    // stops here: the cost of a delete is proportional to what
+                    // the range touches, not to the size of the tree.
+                    if child_start >= range.end.0 {
+                        kept.push(child);
+                        kept.extend(rest);
+                        break;
+                    }
+
                     start += child_len;
 
-                    let outside =
-                        child_start >= range.end.0 || child_start + child_len <= range.start.0;
-
-                    if outside {
+                    // Everything in front of the range is untouched.
+                    if child_start + child_len <= range.start.0 {
                         kept.push(child);
                         continue;
                     }
@@ -238,10 +265,13 @@ impl Node {
                     }
                 }
 
-                if kept.is_empty() {
-                    (None, removed)
-                } else {
-                    (Some(Node::internal(kept)), removed)
+                match kept.len() {
+                    0 => (None, removed),
+                    // A node left with a single child is a level without a
+                    // branch. Collapsing it keeps the tree shallow instead of
+                    // leaving empty levels behind after a large delete.
+                    1 => (kept.pop(), removed),
+                    _ => (Some(Node::internal(kept)), removed),
                 }
             }
         }
@@ -372,14 +402,18 @@ impl Rope {
     }
 
     /// A range of the text. Only the chunks the range touches are copied.
-    pub fn text_in(&self, range: TextRange) -> String {
+    ///
+    /// An invalid range is a `TextError`, never a panic.
+    pub fn text_in(&self, range: TextRange) -> TextResult<String> {
+        validate_range(self.len, range, |offset| self.is_char_boundary(offset))?;
+
         let mut out = String::new();
 
         if let Some(root) = &self.root {
             root.collect_range(range, 0, &mut out);
         }
 
-        out
+        Ok(out)
     }
 
     /// Whether `offset` is on a UTF-8 character boundary.
@@ -396,10 +430,15 @@ impl Rope {
         }
     }
 
-    /// Inserts `text` at `offset`, which has to be a character boundary.
-    pub fn insert(&mut self, offset: TextOffset, text: &str) {
+    /// Inserts `text` at `offset`.
+    ///
+    /// The offset has to be a character boundary; an invalid offset is a
+    /// `TextError`, never a panic.
+    pub fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()> {
+        validate_offset(self.len, self.is_char_boundary(offset), offset)?;
+
         if text.is_empty() {
-            return;
+            return Ok(());
         }
 
         let mut at = offset.0;
@@ -410,25 +449,36 @@ impl Rope {
             self.insert_chunk(at, &chunk);
             at += chunk.len();
         }
+
+        Ok(())
     }
 
-    /// Deletes `range`, which has to be valid.
-    pub fn delete(&mut self, range: TextRange) {
+    /// Deletes `range`.
+    ///
+    /// An invalid range is a `TextError`, never a panic.
+    pub fn delete(&mut self, range: TextRange) -> TextResult<()> {
+        validate_range(self.len, range, |offset| self.is_char_boundary(offset))?;
+
         let root = match self.root.take() {
             Some(root) => root,
-            None => return,
+            None => return Ok(()),
         };
 
         let (new_root, removed) = root.delete(range);
 
         self.root = new_root;
         self.len -= removed;
+
+        Ok(())
     }
+
     /// Splits the rope into two ropes at `offset`.
     ///
     /// The teaching version: it rebuilds both sides from the chunks, which
-    /// costs O(n) (ADR-0009).
-    pub fn split_at(&self, offset: TextOffset) -> (Rope, Rope) {
+    /// costs O(n) (ADR-0009). An invalid offset is a `TextError`.
+    pub fn split_at(&self, offset: TextOffset) -> TextResult<(Rope, Rope)> {
+        validate_offset(self.len, self.is_char_boundary(offset), offset)?;
+
         let mut leaves: Vec<String> = Vec::new();
 
         if let Some(root) = &self.root {
@@ -438,7 +488,7 @@ impl Rope {
         let mut left: Vec<Node> = Vec::new();
         let mut right: Vec<Node> = Vec::new();
         let mut start = 0;
-        let split = offset.0.min(self.len);
+        let split = offset.0;
 
         for leaf in leaves {
             let leaf_len = leaf.len();
@@ -462,7 +512,7 @@ impl Rope {
             start += leaf_len;
         }
 
-        (
+        Ok((
             Rope {
                 root: Node::from_leaves(left),
                 len: split,
@@ -471,7 +521,7 @@ impl Rope {
                 root: Node::from_leaves(right),
                 len: self.len - split,
             },
-        )
+        ))
     }
 
     /// The text of `other` appended to this rope.
@@ -580,21 +630,15 @@ impl TextStore for RopeTextStore {
     }
 
     fn text_in(&self, range: TextRange) -> TextResult<Cow<'_, str>> {
-        self.validate_range(range)?;
-
-        Ok(Cow::Owned(self.rope.text_in(range)))
+        self.rope.text_in(range).map(Cow::Owned)
     }
 
     fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()> {
-        self.validate_offset(offset)?;
-        self.rope.insert(offset, text);
-        Ok(())
+        self.rope.insert(offset, text)
     }
 
     fn delete(&mut self, range: TextRange) -> TextResult<()> {
-        self.validate_range(range)?;
-        self.rope.delete(range);
-        Ok(())
+        self.rope.delete(range)
     }
 
     fn is_char_boundary(&self, offset: TextOffset) -> bool {
@@ -659,7 +703,7 @@ mod tests {
     fn text_is_inserted_at_the_right_place() {
         let mut rope = Rope::from_text("Hllo");
 
-        rope.insert(TextOffset(1), "e");
+        rope.insert(TextOffset(1), "e").unwrap();
 
         assert_eq!(rope.text(), "Hello");
     }
@@ -668,7 +712,7 @@ mod tests {
     fn text_is_appended_at_the_end() {
         let mut rope = Rope::from_text("Hello");
 
-        rope.insert(TextOffset(5), " world");
+        rope.insert(TextOffset(5), " world").unwrap();
 
         assert_eq!(rope.text(), "Hello world");
     }
@@ -677,7 +721,8 @@ mod tests {
     fn a_range_is_deleted() {
         let mut rope = Rope::from_text("Hello world");
 
-        rope.delete(TextRange::new(TextOffset(5), TextOffset(11)));
+        rope.delete(TextRange::new(TextOffset(5), TextOffset(11)))
+            .unwrap();
 
         assert_eq!(rope.text(), "Hello");
         assert_eq!(rope.len(), 5);
@@ -687,7 +732,8 @@ mod tests {
     fn deleting_everything_leaves_an_empty_rope() {
         let mut rope = Rope::from_text("Hello");
 
-        rope.delete(TextRange::new(TextOffset(0), TextOffset(5)));
+        rope.delete(TextRange::new(TextOffset(0), TextOffset(5)))
+            .unwrap();
 
         assert!(rope.is_empty());
         assert_eq!(rope.text(), "");
@@ -699,15 +745,18 @@ mod tests {
         let rope = Rope::from_text("Hello world");
 
         assert_eq!(
-            rope.text_in(TextRange::new(TextOffset(0), TextOffset(5))),
+            rope.text_in(TextRange::new(TextOffset(0), TextOffset(5)))
+                .unwrap(),
             "Hello"
         );
         assert_eq!(
-            rope.text_in(TextRange::new(TextOffset(6), TextOffset(11))),
+            rope.text_in(TextRange::new(TextOffset(6), TextOffset(11)))
+                .unwrap(),
             "world"
         );
         assert_eq!(
-            rope.text_in(TextRange::new(TextOffset(3), TextOffset(3))),
+            rope.text_in(TextRange::new(TextOffset(3), TextOffset(3)))
+                .unwrap(),
             ""
         );
     }
@@ -771,7 +820,7 @@ mod tests {
         let mut rope = Rope::new();
         let text = "a".repeat(10_000);
 
-        rope.insert(TextOffset(0), &text);
+        rope.insert(TextOffset(0), &text).unwrap();
 
         assert_eq!(rope.len(), 10_000);
         assert_eq!(rope.text().len(), 10_000);
@@ -784,7 +833,7 @@ mod tests {
         let mut rope = Rope::from_text(&"a".repeat(MAX_CHUNK - 10));
 
         for _ in 0..50 {
-            rope.insert(TextOffset(0), &"b".repeat(100));
+            rope.insert(TextOffset(0), &"b".repeat(100)).unwrap();
         }
 
         assert!(rope.longest_leaf() <= MAX_CHUNK);
@@ -795,7 +844,7 @@ mod tests {
         let mut rope = Rope::new();
 
         for index in 0..2_000 {
-            rope.insert(TextOffset(0), &index.to_string());
+            rope.insert(TextOffset(0), &index.to_string()).unwrap();
         }
 
         // A tree over 2000 chunks with a branching factor of 8 needs about
@@ -807,7 +856,7 @@ mod tests {
     fn splitting_cuts_the_text_in_two() {
         let rope = Rope::from_text("Hello world");
 
-        let (left, right) = rope.split_at(TextOffset(5));
+        let (left, right) = rope.split_at(TextOffset(5)).unwrap();
 
         assert_eq!(left.text(), "Hello");
         assert_eq!(right.text(), " world");
@@ -818,11 +867,11 @@ mod tests {
     fn splitting_at_the_start_or_the_end() {
         let rope = Rope::from_text("Hello");
 
-        let (left, right) = rope.split_at(TextOffset(0));
+        let (left, right) = rope.split_at(TextOffset(0)).unwrap();
         assert_eq!(left.text(), "");
         assert_eq!(right.text(), "Hello");
 
-        let (left, right) = rope.split_at(TextOffset(5));
+        let (left, right) = rope.split_at(TextOffset(5)).unwrap();
         assert_eq!(left.text(), "Hello");
         assert_eq!(right.text(), "");
     }
@@ -851,7 +900,7 @@ mod tests {
                 let offset = random_boundary(&mirror, &mut state);
                 let text = random_text(&mut state);
 
-                rope.insert(TextOffset(offset), &text);
+                rope.insert(TextOffset(offset), &text).unwrap();
                 mirror.insert_str(offset, &text);
             } else {
                 let first = random_boundary(&mirror, &mut state);
@@ -862,7 +911,8 @@ mod tests {
                     (second, first)
                 };
 
-                rope.delete(TextRange::new(TextOffset(start), TextOffset(end)));
+                rope.delete(TextRange::new(TextOffset(start), TextOffset(end)))
+                    .unwrap();
                 mirror.replace_range(start..end, "");
             }
 
@@ -925,5 +975,179 @@ mod tests {
                 .text_in(TextRange::new(TextOffset(0), TextOffset(5)))
                 .unwrap()
         );
+    }
+
+    // -- invalid input ----------------------------------------------------
+    //
+    // `Rope` is a public type, so a host can call it without going through
+    // `Document`. Every positional method has to answer with a `TextError`
+    // instead of slicing a `String` in the middle of a character.
+
+    #[test]
+    fn insert_rejects_an_offset_inside_a_character() {
+        let mut rope = Rope::from_text("你好");
+
+        assert_eq!(
+            rope.insert(TextOffset(1), "x"),
+            Err(TextError::NotCharBoundary { offset: 1 })
+        );
+        assert_eq!(rope.text(), "你好");
+        assert_eq!(rope.len(), 6);
+    }
+
+    #[test]
+    fn insert_rejects_an_offset_past_the_end() {
+        let mut rope = Rope::from_text("Hello");
+
+        assert_eq!(
+            rope.insert(TextOffset(99), "x"),
+            Err(TextError::OffsetOutOfRange { offset: 99, len: 5 })
+        );
+        assert_eq!(rope.text(), "Hello");
+    }
+
+    #[test]
+    fn insert_into_an_empty_rope_rejects_every_offset_but_zero() {
+        let mut rope = Rope::new();
+
+        assert_eq!(
+            rope.insert(TextOffset(1), "x"),
+            Err(TextError::OffsetOutOfRange { offset: 1, len: 0 })
+        );
+        assert!(rope.is_empty());
+
+        rope.insert(TextOffset(0), "x").unwrap();
+        assert_eq!(rope.text(), "x");
+    }
+
+    #[test]
+    fn delete_rejects_a_range_that_cuts_a_character() {
+        let mut rope = Rope::from_text("你好");
+
+        assert_eq!(
+            rope.delete(TextRange::new(TextOffset(1), TextOffset(2))),
+            Err(TextError::NotCharBoundary { offset: 1 })
+        );
+        assert_eq!(rope.text(), "你好");
+    }
+
+    #[test]
+    fn delete_rejects_an_inverted_or_out_of_range_range() {
+        let mut rope = Rope::from_text("Hello");
+
+        assert_eq!(
+            rope.delete(TextRange::new(TextOffset(3), TextOffset(1))),
+            Err(TextError::InvalidRange { start: 3, end: 1 })
+        );
+        assert_eq!(
+            rope.delete(TextRange::new(TextOffset(0), TextOffset(99))),
+            Err(TextError::OffsetOutOfRange { offset: 99, len: 5 })
+        );
+        assert_eq!(rope.text(), "Hello");
+    }
+
+    #[test]
+    fn split_at_rejects_an_offset_inside_a_character() {
+        let rope = Rope::from_text("你好");
+
+        assert_eq!(
+            rope.split_at(TextOffset(1)),
+            Err(TextError::NotCharBoundary { offset: 1 })
+        );
+        assert_eq!(
+            rope.split_at(TextOffset(99)),
+            Err(TextError::OffsetOutOfRange { offset: 99, len: 6 })
+        );
+    }
+
+    #[test]
+    fn text_in_rejects_a_range_that_cuts_a_character() {
+        let rope = Rope::from_text("你好");
+
+        assert_eq!(
+            rope.text_in(TextRange::new(TextOffset(0), TextOffset(1))),
+            Err(TextError::NotCharBoundary { offset: 1 })
+        );
+        assert_eq!(
+            rope.text_in(TextRange::new(TextOffset(4), TextOffset(2))),
+            Err(TextError::InvalidRange { start: 4, end: 2 })
+        );
+    }
+
+    /// No sequence of raw offsets may take the process down: every method
+    /// either succeeds or reports an error, and the rope stays consistent.
+    #[test]
+    fn no_offset_can_make_the_rope_panic() {
+        let text = "a中b文c";
+        let len = text.len();
+
+        for start in 0..=len + 2 {
+            for end in 0..=len + 2 {
+                let range = TextRange::new(TextOffset(start), TextOffset(end));
+                let mut rope = Rope::from_text(text);
+
+                // Every call may fail; none of them may panic.
+                let _ = rope.insert(TextOffset(start), "x");
+                let _ = rope.delete(range);
+                let _ = rope.split_at(TextOffset(start));
+                let _ = rope.text_in(range);
+
+                // Whatever the four calls decided, the rope is still usable
+                // and still describes exactly the text it reports.
+                assert_eq!(rope.len(), rope.text().len());
+                assert!(
+                    rope.text_in(TextRange::new(TextOffset(0), TextOffset(rope.len())))
+                        .is_ok()
+                );
+            }
+        }
+    }
+
+    /// A delete has to keep the tree tight: a node left with one child is
+    /// collapsed instead of leaving an empty level behind.
+    #[test]
+    fn a_large_delete_does_not_leave_empty_levels() {
+        let mut rope = Rope::from_text(&"a".repeat(64 * MAX_CHUNK));
+
+        let before = rope.depth();
+
+        // Remove everything except the first chunk, then check the text and
+        // the shape of what is left.
+        rope.delete(TextRange::new(
+            TextOffset(MAX_CHUNK),
+            TextOffset(rope.len()),
+        ))
+        .unwrap();
+
+        assert_eq!(rope.len(), MAX_CHUNK);
+        assert_eq!(rope.text(), "a".repeat(MAX_CHUNK));
+        assert!(
+            rope.depth() <= before,
+            "depth grew from {before} to {}",
+            rope.depth()
+        );
+        assert!(rope.leaf_count() <= 2, "leaves: {}", rope.leaf_count());
+    }
+
+    /// The same, from the middle: the tree must stay usable and correct.
+    #[test]
+    fn deleting_a_hole_in_the_middle_keeps_the_tree_correct() {
+        let mut rope = Rope::from_text(&"a".repeat(32 * MAX_CHUNK));
+        let mut mirror = "a".repeat(32 * MAX_CHUNK);
+
+        for _ in 0..8 {
+            let middle = rope.len() / 2;
+            let start = middle - MAX_CHUNK;
+            let end = middle + MAX_CHUNK;
+
+            rope.delete(TextRange::new(TextOffset(start), TextOffset(end)))
+                .unwrap();
+            mirror.replace_range(start..end, "");
+
+            assert_eq!(rope.text(), mirror);
+            assert_eq!(rope.len(), mirror.len());
+        }
+
+        assert!(rope.depth() <= 6, "depth was {}", rope.depth());
     }
 }
