@@ -46,17 +46,14 @@ impl Document<StringTextStore> {
     /// Creates a document holding `text`.
     ///
     /// The document starts at [`RevisionId::INITIAL`]: loading content is not
-    /// an edit.
+    /// an edit. Loading is also infallible, so it does not go through the
+    /// fallible editing path at all.
     pub fn from_text(text: &str) -> Self {
-        let mut document = Self::new();
-
-        // Inserting at offset 0 into an empty document cannot fail.
-        document
-            .store
-            .insert(TextOffset(0), text)
-            .expect("inserting at offset 0 into an empty document cannot fail");
-
-        document
+        Self {
+            store: StringTextStore::from_text(text),
+            metadata: DocumentMetadata::default(),
+            revision: RevisionId::INITIAL,
+        }
     }
 }
 
@@ -140,20 +137,20 @@ impl<S: TextStore> Document<S> {
 impl<S: TextStore> Document<S> {
     /// Inserts `text` at `offset`.
     ///
-    /// Returns the revision produced by the edit.
+    /// Returns the revision produced by the edit. This is one edit expressed
+    /// as a one-edit transaction, so it follows the same rules as
+    /// [`Document::apply_edits`]: an edit that changes nothing does not
+    /// advance the revision.
     pub fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<RevisionId> {
-        self.guard_writable()?;
-        self.store.insert(offset, text)?;
-        Ok(self.advance_revision())
+        self.apply_edits(&[TextEdit::insert(offset, text)])
     }
 
     /// Deletes `range`.
     ///
-    /// Returns the revision produced by the edit.
+    /// Returns the revision produced by the edit. Like [`Document::insert`],
+    /// this is a one-edit transaction.
     pub fn delete(&mut self, range: TextRange) -> TextResult<RevisionId> {
-        self.guard_writable()?;
-        self.store.delete(range)?;
-        Ok(self.advance_revision())
+        self.apply_edits(&[TextEdit::delete(range)])
     }
 
     /// Replaces `range` with `text` as one edit.
@@ -969,5 +966,66 @@ mod tests {
         let document = Document::from_text("Hello");
 
         assert_eq!(document.store().len(), 5);
+    }
+
+    // -- one edit is one transaction ---------------------------------------
+
+    #[test]
+    fn an_empty_insert_does_not_advance_the_revision() {
+        let mut document = Document::from_text("abc");
+
+        assert_eq!(document.insert(TextOffset(1), ""), Ok(RevisionId::INITIAL));
+        assert_eq!(document.text(), "abc");
+        assert_eq!(document.revision(), RevisionId::INITIAL);
+    }
+
+    #[test]
+    fn an_empty_delete_does_not_advance_the_revision() {
+        let mut document = Document::from_text("abc");
+
+        assert_eq!(
+            document.delete(TextRange::new(TextOffset(1), TextOffset(1))),
+            Ok(RevisionId::INITIAL)
+        );
+        assert_eq!(document.text(), "abc");
+        assert_eq!(document.revision(), RevisionId::INITIAL);
+    }
+
+    /// The single edit entry points and the transaction entry point are the
+    /// same engine, so they cannot disagree about what an edit did.
+    #[test]
+    fn one_edit_and_a_one_edit_transaction_do_the_same_thing() {
+        let mut direct = Document::from_text("abc");
+        let mut batch = Document::from_text("abc");
+
+        let from_insert = direct.insert(TextOffset(1), "x").unwrap();
+        let from_batch = batch
+            .apply_edits(&[TextEdit::insert(TextOffset(1), "x")])
+            .unwrap();
+
+        assert_eq!(from_insert, from_batch);
+        assert_eq!(direct.text(), batch.text());
+        assert_eq!(direct.revision(), batch.revision());
+
+        let from_delete = direct
+            .delete(TextRange::new(TextOffset(0), TextOffset(1)))
+            .unwrap();
+        let from_batch = batch
+            .apply_edits(&[TextEdit::delete(TextRange::new(
+                TextOffset(0),
+                TextOffset(1),
+            ))])
+            .unwrap();
+
+        assert_eq!(from_delete, from_batch);
+        assert_eq!(direct.text(), batch.text());
+    }
+
+    #[test]
+    fn loading_a_document_is_not_an_edit() {
+        let document = Document::from_text("Hello");
+
+        assert_eq!(document.revision(), RevisionId::INITIAL);
+        assert_eq!(document.text(), "Hello");
     }
 }
