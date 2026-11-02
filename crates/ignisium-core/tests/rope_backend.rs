@@ -128,6 +128,51 @@ fn both_backends_produce_the_same_text() {
     assert_eq!(rope.text_in(range).unwrap(), string.text_in(range).unwrap());
 }
 
+/// The non-copying read has to behave the same on both backends, including
+/// where it draws the piece boundaries (ADR-0011).
+#[test]
+fn for_each_in_reads_the_same_text_on_both_backends() {
+    let text = "Hello 世界, one two three";
+
+    let rope = rope_document(text);
+    let string = string_document(text);
+
+    let range = TextRange::new(TextOffset(0), TextOffset(text.len()));
+
+    for range in [
+        range,
+        TextRange::new(TextOffset(6), TextOffset(12)),
+        TextRange::new(TextOffset(3), TextOffset(3)),
+    ] {
+        let mut rope_text = String::new();
+        let mut rope_pieces = 0;
+        rope.for_each_in(range, &mut |piece| {
+            rope_pieces += 1;
+            rope_text.push_str(piece);
+        })
+        .unwrap();
+
+        let mut string_text = String::new();
+        string
+            .for_each_in(range, &mut |piece| string_text.push_str(piece))
+            .unwrap();
+
+        assert_eq!(rope_text, string_text);
+        assert_eq!(rope_text, string.text_in(range).unwrap());
+        assert!(rope_pieces >= 1);
+    }
+}
+
+#[test]
+fn for_each_in_reports_an_invalid_range() {
+    let document = rope_document("你好");
+
+    assert_eq!(
+        document.for_each_in(TextRange::new(TextOffset(0), TextOffset(1)), &mut |_| {}),
+        Err(TextError::NotCharBoundary { offset: 1 })
+    );
+}
+
 /// The no-op rule is a document rule, not a backend rule: it has to hold on
 /// the rope too (ADR-0010).
 #[test]
