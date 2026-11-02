@@ -156,16 +156,19 @@ and collapses a node left with a single child.
 | `Rope` | Experimental | prototype, not a default backend |
 | `RopeTextStore` | Experimental | second implementation of the trait |
 | `Document<S>` | Stable | the generic parameter is what makes the second backend usable |
-| `StringTextStore` | Stable | stays the default until week 10 decides otherwise |
+| `StringTextStore` | Stable | confirmed the default backend (ADR-0011) |
 
 ## Future
 
 - Week 10 measures the two backends against the scenarios and thresholds of
   `docs/benchmark/benchmark-requirements.md`, and publishes
-  `docs/benchmark/rope-week10.md`.
+  `docs/benchmark/rope-week10.md`. **Done.** The rope wins on edits above
+  about 1 MiB (100 MiB append: 21.5 ms to 2.4 us), costs 6% more memory, is
+  much slower at a copying range read, and neither backend snapshots cheaply.
 - Week 10 also decides how the public API offers the choice: generic
-  parameter, `Box<dyn TextStore>` or an explicit enum. The generic parameter
-  is in place; the public shape is not decided.
+  parameter, `Box<dyn TextStore>` or an explicit enum. **Decided in
+  ADR-0011:** the generic parameter stays and the string backend stays the
+  default; the rope is opt-in and public.
 - Week 12 (long line) uses the chunk size rule of this prototype: the line
   index of a 100 MB single line has to work on chunks, not on one string.
 - A production rope needs shared nodes for snapshots (R6): the background

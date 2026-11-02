@@ -180,5 +180,8 @@ rest of the API gives for an invalid position.
 - Week 9 implements the rope behind this trait (ADR-0009).
 - Week 10 measures both backends and decides how the public API should offer
   the choice: generic parameter, `Box<dyn TextStore>` or an explicit enum.
+  **Decided in ADR-0011:** the generic parameter stays, the string backend
+  stays the default, the rope stays public and Experimental, and a read that
+  does not copy is added as `for_each_in`.
 - A backend that can answer "how many chunks" or "how much memory" gets a
   capability query instead of exposing its types in the public API.
