@@ -15,7 +15,7 @@ text editing core.
 
 ## Current Status
 
-Early development, weeks 1 to 9 of the development plan are done. The crate
+Early development, weeks 1 to 10 of the development plan are done. The crate
 provides the document model and two storage backends:
 
 ```text
@@ -26,15 +26,15 @@ Document<S> ──► TextStore ──► StringTextStore ──► String
 | Area | State |
 |---|---|
 | `TextOffset` / `TextRange` | byte offsets, UTF-8 boundary validation (ADR-0001, ADR-0004) |
-| `TextStore` | storage abstraction with a range based reading API (ADR-0002, ADR-0008) |
-| `TextError` | fallible text operations, no panics on invalid input (ADR-0003) |
+| `TextStore` | storage abstraction with a range based reading API, `text_in` and the non-copying `for_each_in` (ADR-0002, ADR-0008, ADR-0011) |
+| `TextError` | fallible text operations, no panics on invalid input, `#[non_exhaustive]` (ADR-0003, ADR-0011) |
 | `Document<S>` | storage, metadata and revision, generic over the backend (ADR-0005, ADR-0008) |
 | `TextEdit` | atomic edit transactions; every single edit is a one-edit transaction (ADR-0006, ADR-0010) |
 | `StringTextStore` | the default backend, one contiguous buffer |
 | `RopeTextStore` | rope prototype, a tree of chunks, second backend (ADR-0009) |
 | `Rope` | public rope type, every positional method fallible (ADR-0010) |
 | Benchmarks | Criterion suite, a scaling probe and a backend comparison probe |
-| Storage decision | the rope wins on large documents, the decision is week 10 (ADR-0007) |
+| Backend choice | string by default; the rope is opt in for large documents (ADR-0011) |
 
 Not started yet: line index, selection, undo, search, styling, folding,
 layout, rendering and platform abstraction.
@@ -66,7 +66,11 @@ Benchmarks:
 cargo bench --bench text_store
 cargo bench --bench backends
 cargo test --release --test scaling -- --ignored --nocapture
-cargo test --release --test backend_probe -- --ignored --nocapture
+
+# The probes run one at a time: they share a global allocation counter.
+cargo test --release --test backend_probe backend_comparison -- --ignored --nocapture
+cargo test --release --test backend_probe memory_comparison -- --ignored --nocapture
+cargo test --release --test backend_probe read_strategy_comparison -- --ignored --nocapture
 ```
 
 ## License

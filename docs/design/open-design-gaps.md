@@ -46,6 +46,10 @@ the worst case: the "line" of a viewport is the whole document.
 replacement: `text_in` stays the convenient call for small ranges, the
 visitor is the one that does not copy. Decide in week 10, land before week 13.
 
+**Closed (ADR-0011).** Implemented as `TextStore::for_each_in`; the rope
+overrides the default to walk its chunks. Measured at 10 MiB: 548 us to
+6.9 us for a 1 MiB range, and no allocation.
+
 ## G2 - No revision guard on an edit
 
 **Situation.** `Document::apply_edits(&mut self, edits: &[TextEdit])` takes no
@@ -174,6 +178,9 @@ exist). Do it now: at `0.1.0` with one consumer, it is free.
 
 **Recommendation.** Do it in week 10, before the first external host.
 
+**Closed (ADR-0011).** Both types are `#[non_exhaustive]` and `EditProblem`
+implements `std::error::Error`.
+
 ## G7 - The rope is exported while the layout is promised to be invisible
 
 **Situation.** `lib.rs` exports `Rope`, and `RopeTextStore::rope()` hands out
@@ -201,6 +208,11 @@ public API change.
 Option 2 is cleaner once the rope becomes the default, because a host then
 never needs to name the rope.
 
+**Decided (ADR-0011).** Option 1 for now: the rope stays public and
+Experimental, because the string backend stays the default and the type is
+where week 11's chunk model is explained. The decision is revisited when the
+backend choice is closed.
+
 ## G8 - There is no cross-backend conformance suite
 
 **Situation.** "The rope behaves like the string backend" is a unit test
@@ -226,30 +238,33 @@ into a test that cannot be forgotten.
 |---|---|---|
 | `StringTextStore` keeps its capacity after a large delete | a document that shrinks stays large in memory | week 28 (resource policy) |
 | No `Document::validate_offset` convenience call | a host must combine `len` and `is_char_boundary` and can get the order wrong | week 10, with G6 |
-| `RopeTextStore::text` always allocates | a host that wants "the whole text, if cheap" cannot ask | week 10, with G1 |
-| No `Rope::chunk_sizes` / memory query | the week 10 comparison needs the memory overhead of a rope, and it is not measurable today | week 10 |
+| `RopeTextStore::text` always allocates | a host that wants "the whole text, if cheap" cannot ask; `for_each_in` covers ranges, not the whole text | week 28 |
+| No `Rope::chunk_sizes` / memory query | the overhead was measured in week 10 (1.06x) with a counting allocator in the probe, but a host cannot ask a document what it costs | week 28 (resource policy) |
 | `Document` cannot be constructed from an iterator of chunks | loading a large file still requires one contiguous `&str` | week 12 (long line loading) |
 
 ## Summary
 
-| Gap | Decision by | Changes an existing API |
-|---|---|---|
-| G1 range read copies | week 10, land by 13 | additive |
-| G2 no revision guard | week 10 | yes (`apply_edits` / new batch type) |
-| G3 no offset map | week 10 (shape), land by 15 | yes (return type of `apply_edits`) |
-| G4 quadratic validation | week 15 | no |
-| G5 snapshot is a deep copy | week 10 decision, work by 18 | no (`Clone` semantics) |
-| G6 error types not evolvable | week 10 | additive now, breaking if deferred |
-| G7 rope exported | week 10 | yes (removing an export) |
-| G8 no conformance suite | week 10-11 | no |
-| G9 smaller gaps | as listed | mostly no |
+| Gap | Decision by | Changes an existing API | State |
+|---|---|---|---|
+| G1 range read copies | week 10, land by 13 | additive | **closed**: `for_each_in` (ADR-0011) |
+| G2 no revision guard | week 10 | no, additive `EditBatch` | **decided**: shape in ADR-0011, implement by 15 |
+| G3 no offset map | week 10 (shape), land by 15 | no, additive `AppliedEdits` | **decided**: shape in ADR-0011, implement by 15 |
+| G4 quadratic validation | week 15 | no | open |
+| G5 snapshot is a deep copy | week 10 decision, work by 18 | no (`Clone` semantics) | open, until 18 |
+| G6 error types not evolvable | week 10 | additive now | **closed**: `#[non_exhaustive]` in ADR-0011 |
+| G7 rope exported | week 10 | no, stays public | **decided**: public and Experimental (ADR-0011) |
+| G8 no conformance suite | week 10-11 | no | open, week 11 |
+| G9 smaller gaps | as listed | mostly no | memory **measured** (rope costs 6%) |
 
-The one item that is cheap now and expensive later is the **return type of
+The one item that was cheap now and expensive later was the **return type of
 `apply_edits`** (G2 + G3): it is the centre of the host-facing API, and every
-week from 15 onwards wants more from it than a `RevisionId`. A batch value
-that carries its revision, and an application that reports the offset map,
-answer both questions with one shape and can be introduced before any host
-depends on the current one.
+week from 15 onwards wants more from it than a `RevisionId`. ADR-0011 answers
+that with an additive shape - `EditBatch` carries the revision, `AppliedEdits`
+carries the offset map - and leaves `apply_edits` untouched, so no host has to
+be migrated.
+
+The remaining gaps all have a week: G4 and G8 before the multi-cursor work,
+G5 before the background search, G9 items as listed.
 
 ## Relation to the ADRs
 

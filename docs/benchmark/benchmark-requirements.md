@@ -134,7 +134,7 @@ docs/benchmark/
 ├── benchmark-requirements.md   this document
 ├── baseline-week07.md          the string backend baseline
 ├── rope-preview-week09.md      the first comparison of the two backends
-├── rope-week10.md              the decision (planned)
+├── rope-week10.md              the comparison and the decision (ADR-0011)
 └── long-line-week12.md         the single line scenario (planned)
 ```
 
