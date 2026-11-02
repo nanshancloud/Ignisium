@@ -4,6 +4,10 @@ use std::fmt;
 ///
 /// Invalid input is reported as a value instead of panicking, so a host can
 /// clamp the offset, show a message or abort the edit.
+///
+/// Marked `#[non_exhaustive]` so a new variant can be added without breaking a
+/// host that matches on it (ADR-0011).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextError {
     /// The offset is past the end of the text.

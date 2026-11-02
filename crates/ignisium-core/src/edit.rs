@@ -86,6 +86,7 @@ impl TextEdit {
 /// `Document::edit_problems` reports every problem it can find, so a host can
 /// highlight all the edits it has to fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EditProblem {
     /// Index of the edit in the batch it was passed as.
     pub index: usize,
@@ -99,6 +100,8 @@ impl fmt::Display for EditProblem {
         write!(f, "edit {}: {}", self.index, self.error)
     }
 }
+
+impl std::error::Error for EditProblem {}
 
 #[cfg(test)]
 mod tests {

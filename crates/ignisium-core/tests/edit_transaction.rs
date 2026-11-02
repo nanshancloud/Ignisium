@@ -3,9 +3,7 @@
 //! The unit tests in `src/document.rs` cover the rules one by one. This file
 //! walks through the situations a host actually runs into.
 
-use ignisium_core::{
-    Document, EditProblem, RevisionId, TextEdit, TextError, TextOffset, TextRange,
-};
+use ignisium_core::{Document, RevisionId, TextEdit, TextError, TextOffset, TextRange};
 
 fn document_with(text: &str) -> Document {
     Document::from_text(text)
@@ -143,21 +141,21 @@ fn a_host_can_inspect_a_batch_before_applying_it() {
         TextEdit::delete(range(0, 2)),
     ]);
 
+    assert_eq!(problems.len(), 2);
+
+    assert_eq!(problems[0].index, 1);
     assert_eq!(
-        problems,
-        vec![
-            EditProblem {
-                index: 1,
-                error: TextError::OffsetOutOfRange { offset: 9, len: 3 },
-            },
-            EditProblem {
-                index: 2,
-                error: TextError::OverlappingEdits {
-                    first: 0,
-                    second: 2
-                },
-            },
-        ]
+        problems[0].error,
+        TextError::OffsetOutOfRange { offset: 9, len: 3 }
+    );
+
+    assert_eq!(problems[1].index, 2);
+    assert_eq!(
+        problems[1].error,
+        TextError::OverlappingEdits {
+            first: 0,
+            second: 2
+        }
     );
 }
 
