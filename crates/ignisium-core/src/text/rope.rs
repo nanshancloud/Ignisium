@@ -289,8 +289,9 @@ impl Node {
         }
     }
 
-    /// The text of `range`, in local coordinates.
-    fn collect_range(&self, range: TextRange, start: usize, out: &mut String) {
+    /// The text of `range`, in local coordinates, handed to `visit` chunk by
+    /// chunk.
+    fn visit_range(&self, range: TextRange, start: usize, visit: &mut dyn FnMut(&str)) {
         let node_start = start;
         let node_end = start + self.len();
 
@@ -303,13 +304,13 @@ impl Node {
                 let from = range.start.0.max(node_start) - node_start;
                 let to = range.end.0.min(node_end) - node_start;
 
-                out.push_str(&text[from..to]);
+                visit(&text[from..to]);
             }
             Node::Internal { children, .. } => {
                 let mut child_start = node_start;
 
                 for child in children {
-                    child.collect_range(range, child_start, out);
+                    child.visit_range(range, child_start, visit);
                     child_start += child.len();
                 }
             }
@@ -405,15 +406,24 @@ impl Rope {
     ///
     /// An invalid range is a `TextError`, never a panic.
     pub fn text_in(&self, range: TextRange) -> TextResult<String> {
-        validate_range(self.len, range, |offset| self.is_char_boundary(offset))?;
-
         let mut out = String::new();
 
-        if let Some(root) = &self.root {
-            root.collect_range(range, 0, &mut out);
-        }
+        self.for_each_in(range, &mut |piece| out.push_str(piece))?;
 
         Ok(out)
+    }
+
+    /// Hands the text of `range` to `visit`, chunk by chunk, without copying.
+    ///
+    /// An invalid range is a `TextError`, never a panic.
+    pub fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResult<()> {
+        validate_range(self.len, range, |offset| self.is_char_boundary(offset))?;
+
+        if let Some(root) = &self.root {
+            root.visit_range(range, 0, visit);
+        }
+
+        Ok(())
     }
 
     /// Whether `offset` is on a UTF-8 character boundary.
@@ -631,6 +641,10 @@ impl TextStore for RopeTextStore {
 
     fn text_in(&self, range: TextRange) -> TextResult<Cow<'_, str>> {
         self.rope.text_in(range).map(Cow::Owned)
+    }
+
+    fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResult<()> {
+        self.rope.for_each_in(range, visit)
     }
 
     fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()> {
@@ -1058,6 +1072,49 @@ mod tests {
             rope.split_at(TextOffset(99)),
             Err(TextError::OffsetOutOfRange { offset: 99, len: 6 })
         );
+    }
+
+    #[test]
+    fn for_each_in_visits_the_chunks_of_the_range() {
+        let rope = Rope::from_text(&"a".repeat(4 * MAX_CHUNK + 10));
+        let mut pieces = 0;
+        let mut text = String::new();
+
+        let start = MAX_CHUNK / 2;
+        let end = 4 * MAX_CHUNK + 10;
+
+        rope.for_each_in(
+            TextRange::new(TextOffset(start), TextOffset(end)),
+            &mut |piece| {
+                pieces += 1;
+                text.push_str(piece);
+            },
+        )
+        .unwrap();
+
+        // The range spans five chunks, so it is visited in several pieces and
+        // never materialised as one string inside the rope.
+        assert!(pieces >= 4, "pieces: {pieces}");
+        assert_eq!(text.len(), end - start);
+        assert_eq!(
+            text,
+            rope.text_in(TextRange::new(TextOffset(start), TextOffset(end)))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn for_each_in_rejects_an_invalid_range() {
+        let rope = Rope::from_text("你好");
+        let mut visited = 0;
+
+        assert_eq!(
+            rope.for_each_in(TextRange::new(TextOffset(0), TextOffset(1)), &mut |_| {
+                visited += 1
+            }),
+            Err(TextError::NotCharBoundary { offset: 1 })
+        );
+        assert_eq!(visited, 0);
     }
 
     #[test]

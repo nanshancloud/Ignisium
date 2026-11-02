@@ -37,6 +37,28 @@ pub trait TextStore {
     /// An invalid range is a `TextError`, never a panic.
     fn text_in(&self, range: TextRange) -> TextResult<Cow<'_, str>>;
 
+    /// Hands the text of `range` to `visit`, piece by piece, without copying.
+    ///
+    /// A contiguous backend calls `visit` once; a chunked backend calls it
+    /// once per chunk of the range. The pieces are not guaranteed to be
+    /// lines, words or anything else - only that the concatenation of what
+    /// `visit` sees is exactly `text_in(range)`.
+    ///
+    /// This is the read a viewport, a search scan or the line index should
+    /// use: `text_in` allocates the whole range on a chunked backend, which
+    /// is the one operation where a rope is much slower than a contiguous
+    /// buffer (ADR-0011).
+    ///
+    /// The default implementation materialises the range with `text_in` and
+    /// calls `visit` once, so a backend only overrides this if it can do
+    /// better.
+    fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResult<()> {
+        let text = self.text_in(range)?;
+        visit(&text);
+
+        Ok(())
+    }
+
     fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()>;
 
     fn delete(&mut self, range: TextRange) -> TextResult<()>;

@@ -85,6 +85,15 @@ impl<S: TextStore> Document<S> {
         self.store.text_in(range)
     }
 
+    /// Hands a range of the text to `visit`, piece by piece, without copying.
+    ///
+    /// The pieces are only guaranteed to concatenate to `text_in(range)`.
+    /// This is the read to use for a viewport, a search scan or a line index:
+    /// on a chunked backend `text_in` allocates the whole range.
+    pub fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResult<()> {
+        self.store.for_each_in(range, visit)
+    }
+
     /// Length of the text in UTF-8 bytes.
     pub fn len(&self) -> usize {
         self.store.len()
