@@ -50,6 +50,11 @@ visitor is the one that does not copy. Decide in week 10, land before week 13.
 overrides the default to walk its chunks. Measured at 10 MiB: 548 us to
 6.9 us for a 1 MiB range, and no allocation.
 
+**Follow-up (ADR-0012).** The visitor now returns `ControlFlow<()>`: a scan
+stops at the first hit instead of paying for the rest of the range. Without it,
+search (week 18) could not use the non-copying read at all, and the signature
+would have to change after week 13's line index was written against it.
+
 ## G2 - No revision guard on an edit
 
 **Situation.** `Document::apply_edits(&mut self, edits: &[TextEdit])` takes no
@@ -132,6 +137,13 @@ the sort). The error still names the pair.
 **Recommendation.** Fix it when `edit_problems` gains its next caller (week
 15), together with a large-batch benchmark so that the fix is measured, not
 assumed.
+
+**Closed early (ADR-0012).** The loop is where `claim()` overflowed, so it is
+rewritten once instead of twice: the claims are normalized, sorted by
+`(start, end)` and swept, giving O(k log k + p). The benchmark required by the
+gate is added with the change (`benches/edit_batch.rs`), so "cheaper" is a
+measurement rather than a complexity argument. Note that the *result* is
+unchanged: one `OverlappingEdits` per conflicting pair, in batch order.
 ## G5 - A snapshot is a deep copy
 
 **Situation.** `Rope` derives `Clone`, and cloning it copies every chunk and
@@ -241,20 +253,132 @@ into a test that cannot be forgotten.
 | `RopeTextStore::text` always allocates | a host that wants "the whole text, if cheap" cannot ask; `for_each_in` covers ranges, not the whole text | week 28 |
 | No `Rope::chunk_sizes` / memory query | the overhead was measured in week 10 (1.06x) with a counting allocator in the probe, but a host cannot ask a document what it costs | week 28 (resource policy) |
 | `Document` cannot be constructed from an iterator of chunks | loading a large file still requires one contiguous `&str` | week 12 (long line loading) |
+| `chunk_text` cuts one byte early | the limit is checked at the current character, so ASCII chunks hold `MAX_CHUNK - 1` bytes and 64 KiB becomes 65 leaves with a 1-byte tail | week 12 (the constant is re-examined there) |
+
+## G10 - A delete never merges nodes back
+
+**Situation.** `Node::delete` drops a child that became empty and collapses an
+internal node left with a single child; it never merges two neighbouring
+under-full siblings. Delete all but one byte of every chunk of a 64 KiB rope and
+the tree reports:
+
+```text
+len=64 bytes, leaves=64, depth=7, longest=1
+```
+
+64 bytes of text held by 64 nodes and 7 levels.
+
+**Why.** `MAX_CHUNK` is a maximum, enforced on insert (a leaf that grows past it
+is cut by `chunk_text`). Nothing enforces a minimum and no pass ever puts two
+small neighbours back together, so the node count is monotone under deletion.
+
+**When it hurts.** Every editing session, cumulatively: reads pay pointer
+chasing per node, memory pays one `String` allocation per node, and the tree
+that week 10 measured at 1.06x overhead is a tree shaped by *inserts*. A
+document that is edited for an hour is not that tree.
+
+**Options.**
+
+1. Coalesce neighbouring siblings after a delete: two leaves whose combined
+   length is `<= MAX_CHUNK` become one leaf; two internal siblings whose
+   combined child count is `<= MAX_BRANCHING` become one internal node. The
+   existing single-child collapse becomes the last step of the same pass.
+   Local, no public API change.
+2. Rebuild the tree from its leaves when `leaf_count` exceeds a factor of
+   `len.div_ceil(MAX_CHUNK)`. Simple and restores the optimal shape, but costs
+   O(remaining text) at an unpredictable moment.
+3. Leave it and rely on the next insert to fill the gaps. Rejected: inserts
+   split full leaves, they do not move text between under-full ones, so the
+   1-byte-per-leaf case never recovers.
+
+**Recommendation.** Option 1, in week 12 next to the long-line work (the week
+with the most chunks, so the gain is measurable there), with
+`len.div_ceil(MAX_CHUNK)` as the reference the regression test asserts against.
+Keep option 2 as the fallback if that measurement shows coalescing alone does
+not converge.
+
+**Related, and must be written down with it:** the header of `rope.rs` claims
+"all leaves sit at the same depth", but collapsing a single-child internal node
+already removes one level in one branch while its siblings keep theirs. The
+invariant the code actually maintains is "no path is deeper than the height at
+load time, and depth may differ between subtrees" (`depth()` reports the
+maximum). Coalescing makes that more visible, not worse; restoring strict height
+balance needs borrow/rotate, which is not worth it for the prototype. The honest
+statement plus a test is enough.
+
+## G11 - Equality on public types compares layout, not content
+
+**Situation.** `Rope` derives `PartialEq`, and `Node` compares leaf strings and
+child order, so two ropes holding the same text in a different chunk layout are
+unequal. `Document<S>` derives over `store`, `metadata` and `revision`, so it
+inherits both the layout comparison and "same text, different revision ->
+unequal".
+
+**Why.** The derive was the shortest path while there was one backend with one
+shape.
+
+**When it hurts.** As soon as a host compares: a dirty check after a formatting
+pass, a snapshot compared with the live document (week 17/18), an undo that
+restores the same text. There the inequality is silently wrong rather than
+merely inconvenient, and ADR-0008 promised the layout would be invisible.
+
+**Options.** 1. Manual `PartialEq` for `Rope` over `len` and the text, keep
+`Document`'s derive but document what it means, and add `Document::text_eq` for
+the content-only question. 2. Keep the derive on `Rope` and add `text_eq`
+everywhere. 3. Remove `PartialEq` from `Rope`.
+
+**Recommendation.** Option 1: the defect is in `Rope` (a layout detail in a
+public type), not in `Document`, whose three-part comparison is a useful *state*
+comparison once the store comparison is semantic.
+
+**Closed (ADR-0012).**
+
+## G12 - "Validated means infallible" is a contract nobody wrote down
+
+**Situation.** `apply_edits` validates the batch against the snapshot and then
+applies it with `?` on every store call. A store call that failed after the
+first edit landed would leave the batch half applied - the one thing ADR-0006
+promises cannot happen. No current backend can do that (validation is their only
+error source), but `TextStore` is a public trait: the next backend has only the
+code as a specification. `Replace` makes it worse by being two calls
+(`delete` then `insert`) whose coupling exists as a comment in `document.rs`.
+
+**Why.** With one backend the property was obvious; with a trait it became an
+unstated obligation.
+
+**When it hurts.** The first third backend (week 11 chunk model, or any
+host-provided store), and every future edit kind that is more than one store
+call.
+
+**Options.** 1. State the contract on `TextStore`, assert it in debug builds in
+`apply_edit`, and test it once per backend in the conformance suite (G8).
+2. Give the store a transactional API (`begin` / `commit` / `rollback`) - a
+large change for a property no backend violates. 3. Buffer the result and swap
+it in at the end - defeats the point of an incremental store.
+
+**Recommendation.** Option 1, plus `TextStore::replace` so that a replacement is
+one operation in one place.
+
+**Decided (ADR-0012).** The contract and the debug assertion land in week 11
+with the conformance suite; `TextStore::replace` and its rope override land in
+week 12.
 
 ## Summary
 
 | Gap | Decision by | Changes an existing API | State |
 |---|---|---|---|
-| G1 range read copies | week 10, land by 13 | additive | **closed**: `for_each_in` (ADR-0011) |
+| G1 range read copies | week 10, land by 13 | additive | **closed**: `for_each_in` (ADR-0011) + stoppable visitor (ADR-0012) |
 | G2 no revision guard | week 10 | no, additive `EditBatch` | **decided**: shape in ADR-0011, implement by 15 |
 | G3 no offset map | week 10 (shape), land by 15 | no, additive `AppliedEdits` | **decided**: shape in ADR-0011, implement by 15 |
-| G4 quadratic validation | week 15 | no | open |
+| G4 quadratic validation | week 15 | no | **closed early**: normalized claims, sorted sweep (ADR-0012) |
 | G5 snapshot is a deep copy | week 10 decision, work by 18 | no (`Clone` semantics) | open, until 18 |
 | G6 error types not evolvable | week 10 | additive now | **closed**: `#[non_exhaustive]` in ADR-0011 |
 | G7 rope exported | week 10 | no, stays public | **decided**: public and Experimental (ADR-0011) |
 | G8 no conformance suite | week 10-11 | no | open, week 11 |
 | G9 smaller gaps | as listed | mostly no | memory **measured** (rope costs 6%) |
+| G10 delete never merges nodes | week 12 | no | open, week 12 |
+| G11 equality compares layout | week 11 | `Rope`'s `PartialEq` semantics | **closed**: content equality + `Document::text_eq` (ADR-0012) |
+| G12 validated-means-infallible unwritten | week 11 contract, week 12 `replace` | no, additive `TextStore::replace` | **decided**: contract + debug assert + conformance test (ADR-0012) |
 
 The one item that was cheap now and expensive later was the **return type of
 `apply_edits`** (G2 + G3): it is the centre of the host-facing API, and every
@@ -263,12 +387,18 @@ that with an additive shape - `EditBatch` carries the revision, `AppliedEdits`
 carries the offset map - and leaves `apply_edits` untouched, so no host has to
 be migrated.
 
-The remaining gaps all have a week: G4 and G8 before the multi-cursor work,
-G5 before the background search, G9 items as listed.
+The remaining gaps all have a week: G8 and the contract half of G12 in week 11,
+G10 and the `replace` half of G12 in week 12 (with the long-line work), G5
+before the background search, G9 items as listed.
 
 ## Relation to the ADRs
 
-- ADR-0006 defines the transaction rules that G2 and G3 extend.
-- ADR-0008 defines the read contract that G1 wants to extend.
-- ADR-0009 lists the prototype limits that G5 repeats with a schedule.
+- ADR-0006 defines the transaction rules that G2 and G3 extend, and that
+  ADR-0012 restates as a pipeline.
+- ADR-0008 defines the read contract that G1 extends and that G11 restores (the
+  layout stays invisible, including in equality).
+- ADR-0009 lists the prototype limits that G5 and G10 repeat with a schedule.
 - ADR-0010 records the hardening that makes G7 a choice instead of a defect.
+- ADR-0011 decides the backend, the read strategy and the edit batch shape.
+- ADR-0012 normalizes edits, makes claims total, makes the read stoppable and
+  makes equality semantic.

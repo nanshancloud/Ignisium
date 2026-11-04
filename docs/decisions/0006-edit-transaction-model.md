@@ -99,6 +99,17 @@ An insertion claims one position rather than nothing, so "insert at 3" and
 "delete [0, 6)" cannot both be right. Touching ranges do not conflict:
 `[0, 2)` and `[2, 4)` may both be deleted.
 
+**Amended by ADR-0012:** the claim table above is the *canonical* form of an
+edit. `Replace` over an empty range is normalized to `Insert` before it is
+validated, so the table has no empty claim in it: every claim that reaches
+comparison is non-empty, and the `+1` of an insertion saturates instead of
+overflowing. A `Replace` written over an empty range therefore conflicts with an
+`Insert` at the same position, exactly like a second `Insert` would.
+
+**Amended by ADR-0012:** the conflict check is a sorted sweep
+(O(k log k + p)) instead of a pairwise comparison, and it compares only edits
+whose endpoints validated. The reported pairs and their order are unchanged.
+
 The escape hatch is `TextEdit::replace`: an edit that removes a range and
 inserts at `range.start` is one claim, not two. That is how a host expresses
 auto-indent:
@@ -133,6 +144,12 @@ No-op edits are dropped **before** validation. An edit with no effect has no
 error and no position to protect: a batch never fails because of an edit that
 would not have done anything. This keeps one rule true for the whole batch:
 what is validated is what is applied.
+
+**Amended by ADR-0012:** dropping no-ops and rewriting the two degenerate
+`Replace` forms are one stage, called normalization. After it, a batch contains
+only three shapes - `Insert` with non-empty text, `Delete` over a non-empty
+range, `Replace` over a non-empty range with non-empty text - and every edit in
+it has a non-empty claim.
 
 ### 6. Every single edit is a one-edit transaction
 

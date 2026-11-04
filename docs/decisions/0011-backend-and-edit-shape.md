@@ -72,6 +72,21 @@ fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResu
 
 `&mut dyn FnMut` and not `impl FnMut`, so that the trait stays object safe.
 
+**Amended by ADR-0012:** the visitor returns `ControlFlow<()>`, so a scan can
+stop at its first hit without materialising the rest of the range:
+
+```rust
+fn for_each_in(
+    &self,
+    range: TextRange,
+    visit: &mut dyn FnMut(&str) -> ControlFlow<()>,
+) -> TextResult<()>;
+```
+
+The change is made while the method is Experimental and has no caller outside
+the crate; after week 13 and week 18 are written against it, it would be a
+breaking change in the read path.
+
 The rope overrides it to walk the chunks, which replaces the copy with one
 closure call per chunk: 548 us become 6.9 us at 10 MiB, and 5.5 ms become
 144 us at 100 MiB.
@@ -147,7 +162,7 @@ This had to happen before the first external host, not after.
 | `StringTextStore` | Stable | default backend |
 | `Rope` | Experimental | public, safe for any host input, wins on large edits |
 | `RopeTextStore` | Experimental | opt-in backend for large documents |
-| `for_each_in` | Experimental | additive read without copying |
+| `for_each_in` | Experimental | additive read without copying; stoppable visitor since ADR-0012 |
 | `EditBatch` / `AppliedEdits` | Experimental | decided, to be implemented by week 15 |
 | `TextError` / `EditProblem` | Stable | `#[non_exhaustive]` from now on |
 
