@@ -15,3 +15,7 @@ harness = false
 [[bench]]
 name = "backends"
 harness = false
+
+[[bench]]
+name = "edit_batch"
+harness = false
