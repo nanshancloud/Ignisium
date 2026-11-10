@@ -2,9 +2,23 @@
 
 ## Status
 
-Accepted. **Nothing here is implemented.** Decisions 1, 2 and 4 land in week 11
-together with ADR-0012; decision 3 in week 12; decision 5 in week 13, pulled
-forward from week 18; decision 6 is a policy that applies from week 12.
+Accepted. **Decisions 1, 2 and 4 are implemented** (week 11, together with
+ADR-0012): `EditBatch` / `apply_batch` / `StaleRevision` / `AppliedEdits` /
+`OffsetMap`, same-offset insertion ordering, and the stoppable read.
+Decision 3 (one batch per flush, session in the host) is a policy for the
+adapter and lands in week 12 with it; decision 5 (shared nodes) in week 13;
+decision 6 is a documented requirement from week 12 on.
+
+Where the decisions live now:
+
+| Decision | Code |
+|---|---|
+| 1 revision guard + map | `EditBatch`, `Document::apply_batch`, `TextError::StaleRevision`, `AppliedEdits`, `OffsetMap` |
+| 2 same-offset insertions | `edit::conflicts` (claims intersect and are not both insertions) |
+| 3 flush policy | host side, week 12 |
+| 4 stoppable transfer read | `TextStore::for_each_in` (ADR-0012 decision 5) |
+| 5 shared nodes | week 13 |
+| 6 machine-rate edits on the rope | adapter requirement, week 12 |
 
 Refines ADR-0006 (transaction rules) and ADR-0011 (backend choice, `EditBatch`
 shape), keeps ADR-0012 decision 5 (`ControlFlow`) as the read half, and

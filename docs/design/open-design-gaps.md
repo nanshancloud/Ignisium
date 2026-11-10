@@ -433,36 +433,34 @@ away from the host.
 
 ## Summary
 
-"State" is what the code does at the end of week 10, not what an ADR says: no
-decision of ADR-0012 and none of ADR-0013 is in the tree yet.
+"State" is what the code does at the end of week 11, not what an ADR says.
 
 | Gap | Decision by | Changes an existing API | State |
 |---|---|---|---|
-| G1 range read copies | week 10, land by 13 | additive | **half closed**: `for_each_in` landed (ADR-0011); the stoppable visitor is decided (ADR-0012) and scheduled for week 11 |
-| G2 no revision guard | week 11 | no, additive `EditBatch` | **decided**: shape in ADR-0011, pulled forward from 15 to week 11 by ADR-0013; not implemented |
-| G3 no offset map | week 11 | no, additive `AppliedEdits` | **decided**: shape in ADR-0011, pulled forward from 15 to week 11 by ADR-0013; not implemented |
-| G4 quadratic validation | week 11 | no | **decided**: normalized claims, sorted sweep (ADR-0012), week 11; not implemented |
+| G1 range read copies | week 10, land by 13 | additive | **closed** for reads: `for_each_in` landed (ADR-0011) and is stoppable since week 11 (ADR-0012) |
+| G2 no revision guard | week 11 | no, additive `EditBatch` | **closed**: `EditBatch` / `apply_batch` / `StaleRevision` (ADR-0013 decision 1) |
+| G3 no offset map | week 11 | no, additive `AppliedEdits` | **closed**: `AppliedEdits` + `OffsetMap`, `O(log n)` per lookup |
+| G4 quadratic validation | week 11 | no | **closed**: normalized claims, sorted sweep; 32 ms → 246 µs at 10 000 edits (`docs/benchmark/edit-batch-week11.md`) |
 | G5 snapshot is a deep copy | week 13 | no (`Clone` semantics) | **decided**: shared nodes (ADR-0013), pulled forward from 18 to week 13 |
-| G6 error types not evolvable | week 10 | additive now | **closed**: `#[non_exhaustive]` in ADR-0011 |
-| G7 rope exported | week 10 | no, stays public | **decided**: public and Experimental (ADR-0011) |
-| G8 no conformance suite | week 11 | no | open, week 11 |
+| G6 error types not evolvable | week 10 | additive now | **closed**: `#[non_exhaustive]` in ADR-0011; `StaleRevision` was added without a breaking change |
+| G7 rope exported | week 10 | no, stays public | **decided**: public and Experimental (ADR-0011); the chunk model stays internal (ADR-0014) |
+| G8 no conformance suite | week 11 | no | **closed**: `tests/conformance.rs` runs one suite per backend |
 | G9 smaller gaps | as listed | mostly no | memory **measured** (rope costs 6%) |
 | G10 delete never merges nodes | week 12 | no | open, week 12 |
-| G11 equality compares layout | week 11 | `Rope`'s `PartialEq` semantics | **decided**: content equality + `Document::text_eq` (ADR-0012), week 11; not implemented |
-| G12 validated-means-infallible unwritten | week 11 contract, week 12 `replace` | no, additive `TextStore::replace` | **decided**: contract + debug assert + conformance test (ADR-0012) |
-| G13 the edit path assumes a human writer | week 11 ordering, week 12 flush | `OverlappingEdits` no longer covers insert vs insert | **decided**: ordered same-point insertions, one batch per flush (ADR-0013); not implemented |
+| G11 equality compares layout | week 11 | `Rope`'s `PartialEq` semantics | **closed**: `Rope` compares content, `Document::text_eq` added (ADR-0012 decision 7) |
+| G12 validated-means-infallible unwritten | week 11 contract, week 12 `replace` | no, additive `TextStore::replace` | **contract closed**: documented on the trait, asserted in `apply_edit`, tested per backend; `replace` is week 12 |
+| G13 the edit path assumes a human writer | week 11 ordering, week 12 flush | `OverlappingEdits` no longer covers insert vs insert | **ordering closed**: same-offset insertions read in batch order; the flush policy is week 12 |
 
 The one item that was cheap now and expensive later was the **return type of
 `apply_edits`** (G2 + G3): it is the centre of the host-facing API, and every
 week from 15 onwards wants more from it than a `RevisionId`. ADR-0011 answers
 that with an additive shape - `EditBatch` carries the revision, `AppliedEdits`
 carries the offset map - and leaves `apply_edits` untouched, so no host has to
-be migrated. ADR-0013 then moves both to week 11, because an asynchronous writer
-needs the guard before it needs the map, and both arrive in one signature.
+be migrated. ADR-0013 then moved both to week 11, because an asynchronous writer
+needs the guard before it needs the map, and both arrived in one signature.
 
-The remaining gaps all have a week: G1's stoppable visitor, G2, G3, G4, G8, G11
-and the contract half of G12 in week 11; G10, G13's flush policy and the
-`replace` half of G12 in week 12; G5 in week 13; G9 items as listed.
+The remaining gaps all have a week: G10, G13's flush policy and the `replace`
+half of G12 in week 12; G5 in week 13; G9 items as listed.
 
 ## Relation to the ADRs
 
@@ -474,9 +472,12 @@ and the contract half of G12 in week 11; G10, G13's flush policy and the
 - ADR-0010 records the hardening that makes G7 a choice instead of a defect.
 - ADR-0011 decides the backend, the read strategy and the edit batch shape.
 - ADR-0012 normalizes edits, makes claims total, makes the read stoppable and
-  makes equality semantic. Its decisions are planned, not implemented; its
-  week table lives in ADR-0013.
+  makes equality semantic. Decisions 1 to 5 and 7 landed in week 11; its week
+  table lives in ADR-0013.
 - ADR-0013 places the pipeline in time: a batch names its revision and returns
   the offset map (G2, G3), two insertions at one offset are ordered instead of
   rejected (G13), a stream is one batch per flush (G13), snapshots share nodes
   (G5) and machine-rate edits run on the rope.
+- ADR-0014 keeps the chunk model behind the boundary: chunk terms stay internal,
+  the host keeps offsets and three read calls, and a new backend enters through
+  the conformance suite.

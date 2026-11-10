@@ -2,16 +2,31 @@
 
 ## Status
 
-Accepted. **Planned, not implemented.** Decisions 1 to 5 and 7 are scheduled
-for week 11, before the chunk model and before the first external host; decision
-6 lands in week 12, with the long-line work that re-examines the chunk sizes.
+Accepted. **Decisions 1 to 5 and 7 are implemented** (week 11); decision 6 is
+half implemented - the contract is written on the trait and asserted in debug
+builds, while `TextStore::replace` and the rope's fused override land in week
+12 with the long-line work that re-examines the chunk sizes.
 
-The state of the code at the end of week 10 is the state described in Context:
-`claim()` still adds one to an offset the host chose (`edit.rs`), `edit_problems`
-is still the pairwise loop (`document.rs`), `for_each_in` still returns `()`
-(`store.rs`, `rope.rs`), `Rope` still derives `PartialEq`, and
-`TextStore::replace` does not exist. Nothing in this ADR should be read as
-"already in the tree".
+`docs/benchmark/edit-batch-week11.md` is the gate for decision 4: 321 µs to
+9.6 µs at 1 000 edits, 32 ms to 246 µs at 10 000.
+
+What the code looked like before this landed, kept because Context describes it:
+`claim()` added one to an offset the host chose (`edit.rs`), `edit_problems`
+was the pairwise loop (`document.rs`), `for_each_in` returned `()`
+(`store.rs`, `rope.rs`), `Rope` derived `PartialEq`, and `TextStore::replace`
+did not exist.
+
+Where the decisions live now:
+
+| Decision | Code |
+|---|---|
+| 1 normalization | `edit::normalize`, `edit::Effective` |
+| 2 total claim | `Effective::claim` (saturating) |
+| 3 one pipeline | `Document::plan`, used by `edit_problems` and `apply_batch` |
+| 4 sweep | `edit::conflicts` |
+| 5 stoppable read | `TextStore::for_each_in`, `Node::visit_range` |
+| 6 `replace` contract | documented on `TextStore::insert` / `delete`, asserted in `Document::apply_edit`; the method itself is week 12 |
+| 7 content equality | `impl PartialEq for Rope`, `Document::text_eq` |
 
 Two consequences for a reader who arrives later:
 
@@ -20,8 +35,9 @@ Two consequences for a reader who arrives later:
 - Decision 1's conflict rule ("two edits that write at the same position are
   rejected no matter how they are spelled") is refined by ADR-0013 decision 2
   for machine-rate writes: two insertions at one offset are ordered, not
-  rejected. The refinement is cheap to fold in because decision 1 has not been
-  implemented yet.
+  rejected. Both landed in the same week, so the code has one rule -
+  "claims intersect **and** they are not both insertions" - and not a rule plus
+  an amendment.
 
 Refines ADR-0006 (transaction rules), ADR-0008 (the layout stays invisible) and
 ADR-0011 (decision 3, `for_each_in`).
