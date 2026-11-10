@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::ops::ControlFlow;
 
 use super::{validate_offset, validate_range};
 use crate::error::TextResult;
@@ -44,6 +45,12 @@ pub trait TextStore {
     /// lines, words or anything else - only that the concatenation of what
     /// `visit` sees is exactly `text_in(range)`.
     ///
+    /// `visit` returns [`ControlFlow`]: `Break` ends the walk and the call
+    /// still returns `Ok`, because a caller that already has its answer has
+    /// not hit an error. That is what lets a search stop at the first hit or
+    /// a transfer stop at a closed socket without materialising the rest of
+    /// the range (ADR-0012 decision 5).
+    ///
     /// This is the read a viewport, a search scan or the line index should
     /// use: `text_in` allocates the whole range on a chunked backend, which
     /// is the one operation where a rope is much slower than a contiguous
@@ -52,15 +59,30 @@ pub trait TextStore {
     /// The default implementation materialises the range with `text_in` and
     /// calls `visit` once, so a backend only overrides this if it can do
     /// better.
-    fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResult<()> {
+    fn for_each_in(
+        &self,
+        range: TextRange,
+        visit: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> TextResult<()> {
         let text = self.text_in(range)?;
-        visit(&text);
+        let _ = visit(&text);
 
         Ok(())
     }
 
+    /// Inserts `text` at `offset`.
+    ///
+    /// # Contract
+    ///
+    /// Once [`TextStore::validate_offset`] has accepted `offset`, this does not
+    /// return `Err`. A backend that can fail for another reason would break
+    /// the atomicity of a batch (ADR-0012 decision 6).
     fn insert(&mut self, offset: TextOffset, text: &str) -> TextResult<()>;
 
+    /// Removes `range`.
+    ///
+    /// Same contract as [`TextStore::insert`]: accepted endpoints mean the
+    /// call succeeds.
     fn delete(&mut self, range: TextRange) -> TextResult<()>;
 
     /// Whether `offset` sits on a UTF-8 character boundary.

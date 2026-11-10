@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::revision::RevisionId;
+
 /// Errors produced by fallible text operations.
 ///
 /// Invalid input is reported as a value instead of panicking, so a host can
@@ -30,6 +32,17 @@ pub enum TextError {
     ///
     /// `first` and `second` are indexes into the batch, with `first < second`.
     OverlappingEdits { first: usize, second: usize },
+
+    /// The batch was written against a revision the document has left behind.
+    ///
+    /// The offsets of a stale batch describe text that no longer exists, so it
+    /// is rejected before it is validated (ADR-0013 decision 1).
+    StaleRevision {
+        /// The revision the batch named.
+        expected: RevisionId,
+        /// The revision the document is at now.
+        actual: RevisionId,
+    },
 }
 
 /// Shorthand for results of text operations.
@@ -54,6 +67,10 @@ impl fmt::Display for TextError {
             TextError::OverlappingEdits { first, second } => write!(
                 f,
                 "edits {first} and {second} of the batch claim the same text"
+            ),
+            TextError::StaleRevision { expected, actual } => write!(
+                f,
+                "the batch was written against {expected} but the document is at {actual}"
             ),
         }
     }

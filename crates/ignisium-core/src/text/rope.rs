@@ -7,6 +7,7 @@
 //! This is a prototype, its limits are listed in ADR-0009.
 
 use std::borrow::Cow;
+use std::ops::ControlFlow;
 
 use super::{TextStore, validate_offset, validate_range};
 use crate::error::TextResult;
@@ -291,12 +292,20 @@ impl Node {
 
     /// The text of `range`, in local coordinates, handed to `visit` chunk by
     /// chunk.
-    fn visit_range(&self, range: TextRange, start: usize, visit: &mut dyn FnMut(&str)) {
+    ///
+    /// The break of `visit` travels back up the tree, so the chunks behind it
+    /// are never walked (ADR-0012 decision 5).
+    fn visit_range(
+        &self,
+        range: TextRange,
+        start: usize,
+        visit: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
         let node_start = start;
         let node_end = start + self.len();
 
         if node_end <= range.start.0 || node_start >= range.end.0 {
-            return;
+            return ControlFlow::Continue(());
         }
 
         match self {
@@ -304,15 +313,17 @@ impl Node {
                 let from = range.start.0.max(node_start) - node_start;
                 let to = range.end.0.min(node_end) - node_start;
 
-                visit(&text[from..to]);
+                visit(&text[from..to])
             }
             Node::Internal { children, .. } => {
                 let mut child_start = node_start;
 
                 for child in children {
-                    child.visit_range(range, child_start, visit);
+                    child.visit_range(range, child_start, visit)?;
                     child_start += child.len();
                 }
+
+                ControlFlow::Continue(())
             }
         }
     }
@@ -357,11 +368,26 @@ impl Node {
 /// A rope: the text as a tree of chunks.
 ///
 /// A prototype, its limits are documented in ADR-0009.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// # Equality
+///
+/// Two ropes are equal when they hold the same characters, whatever their
+/// chunk layout. The layout is a storage detail and stays behind the
+/// boundary (ADR-0008); a host that needs it asks `leaf_count` and
+/// `longest_leaf` explicitly (ADR-0012 decision 7).
+#[derive(Debug, Clone, Default)]
 pub struct Rope {
     root: Option<Node>,
     len: usize,
 }
+
+impl PartialEq for Rope {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.text() == other.text()
+    }
+}
+
+impl Eq for Rope {}
 
 impl Rope {
     /// An empty rope.
@@ -408,19 +434,29 @@ impl Rope {
     pub fn text_in(&self, range: TextRange) -> TextResult<String> {
         let mut out = String::new();
 
-        self.for_each_in(range, &mut |piece| out.push_str(piece))?;
+        self.for_each_in(range, &mut |piece| {
+            out.push_str(piece);
+
+            ControlFlow::Continue(())
+        })?;
 
         Ok(out)
     }
 
     /// Hands the text of `range` to `visit`, chunk by chunk, without copying.
     ///
-    /// An invalid range is a `TextError`, never a panic.
-    pub fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResult<()> {
+    /// `visit` may return [`ControlFlow::Break`] to end the walk; the call
+    /// still returns `Ok` (ADR-0012 decision 5). An invalid range is a
+    /// `TextError`, never a panic.
+    pub fn for_each_in(
+        &self,
+        range: TextRange,
+        visit: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> TextResult<()> {
         validate_range(self.len, range, |offset| self.is_char_boundary(offset))?;
 
         if let Some(root) = &self.root {
-            root.visit_range(range, 0, visit);
+            let _ = root.visit_range(range, 0, visit);
         }
 
         Ok(())
@@ -643,7 +679,11 @@ impl TextStore for RopeTextStore {
         self.rope.text_in(range).map(Cow::Owned)
     }
 
-    fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResult<()> {
+    fn for_each_in(
+        &self,
+        range: TextRange,
+        visit: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> TextResult<()> {
         self.rope.for_each_in(range, visit)
     }
 
@@ -1088,6 +1128,8 @@ mod tests {
             &mut |piece| {
                 pieces += 1;
                 text.push_str(piece);
+
+                ControlFlow::Continue(())
             },
         )
         .unwrap();
@@ -1110,11 +1152,81 @@ mod tests {
 
         assert_eq!(
             rope.for_each_in(TextRange::new(TextOffset(0), TextOffset(1)), &mut |_| {
-                visited += 1
+                visited += 1;
+
+                ControlFlow::Continue(())
             }),
             Err(TextError::NotCharBoundary { offset: 1 })
         );
         assert_eq!(visited, 0);
+    }
+
+    /// A search does not need the rest of the range once it has a hit
+    /// (ADR-0012 decision 5).
+    #[test]
+    fn for_each_in_stops_at_the_first_break() {
+        let rope = Rope::from_text(&"a".repeat(8 * MAX_CHUNK));
+        let mut pieces = 0;
+
+        let outcome = rope.for_each_in(
+            TextRange::new(TextOffset(0), TextOffset(8 * MAX_CHUNK)),
+            &mut |_| {
+                pieces += 1;
+
+                ControlFlow::Break(())
+            },
+        );
+
+        // A stop is not an error, and it costs exactly one chunk.
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(pieces, 1);
+    }
+
+    #[test]
+    fn for_each_in_walks_the_whole_range_without_a_break() {
+        let rope = Rope::from_text(&"a".repeat(8 * MAX_CHUNK));
+        let mut pieces = 0;
+
+        rope.for_each_in(
+            TextRange::new(TextOffset(0), TextOffset(8 * MAX_CHUNK)),
+            &mut |_| {
+                pieces += 1;
+
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+
+        assert!(pieces >= 8, "pieces: {pieces}");
+    }
+
+    // -- equality ---------------------------------------------------------
+
+    /// Same text, different chunk layout: equal. The layout is a storage
+    /// detail (ADR-0012 decision 7).
+    ///
+    /// Inserting at the front leaves a trail of one-byte chunks behind, which
+    /// is exactly the layout this test needs: same characters, a different
+    /// tree.
+    #[test]
+    fn equality_ignores_the_chunk_layout() {
+        let mut spread = Rope::new();
+
+        for _ in 0..1100 {
+            spread.insert(TextOffset(0), "a").unwrap();
+        }
+
+        let packed = Rope::from_text(&"a".repeat(1100));
+
+        assert_eq!(spread.text(), packed.text());
+        assert_ne!(spread.leaf_count(), packed.leaf_count());
+        assert_eq!(spread, packed);
+    }
+
+    #[test]
+    fn different_text_is_not_equal() {
+        assert_ne!(Rope::from_text("abc"), Rope::from_text("abd"));
+        assert_ne!(Rope::from_text("abc"), Rope::from_text("ab"));
     }
 
     #[test]

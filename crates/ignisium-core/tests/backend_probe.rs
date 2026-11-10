@@ -16,6 +16,7 @@
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -425,7 +426,11 @@ fn read_strategy_comparison() {
                 let mut total = 0;
 
                 document
-                    .for_each_in(range, &mut |piece| total += piece.len())
+                    .for_each_in(range, &mut |piece| {
+                        total += piece.len();
+
+                        ControlFlow::Continue(())
+                    })
                     .unwrap();
 
                 assert_eq!(total, size / 10);

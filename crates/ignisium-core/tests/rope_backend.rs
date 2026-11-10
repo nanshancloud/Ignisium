@@ -4,6 +4,8 @@
 //! backend it is talking to: the same edits, transactions and errors have to
 //! work on both.
 
+use std::ops::ControlFlow;
+
 use ignisium_core::{
     Document, RopeTextStore, StringTextStore, TextEdit, TextError, TextOffset, TextRange,
 };
@@ -149,12 +151,18 @@ fn for_each_in_reads_the_same_text_on_both_backends() {
         rope.for_each_in(range, &mut |piece| {
             rope_pieces += 1;
             rope_text.push_str(piece);
+
+            ControlFlow::Continue(())
         })
         .unwrap();
 
         let mut string_text = String::new();
         string
-            .for_each_in(range, &mut |piece| string_text.push_str(piece))
+            .for_each_in(range, &mut |piece| {
+                string_text.push_str(piece);
+
+                ControlFlow::Continue(())
+            })
             .unwrap();
 
         assert_eq!(rope_text, string_text);
@@ -168,7 +176,9 @@ fn for_each_in_reports_an_invalid_range() {
     let document = rope_document("你好");
 
     assert_eq!(
-        document.for_each_in(TextRange::new(TextOffset(0), TextOffset(1)), &mut |_| {}),
+        document.for_each_in(TextRange::new(TextOffset(0), TextOffset(1)), &mut |_| {
+            ControlFlow::Continue(())
+        }),
         Err(TextError::NotCharBoundary { offset: 1 })
     );
 }

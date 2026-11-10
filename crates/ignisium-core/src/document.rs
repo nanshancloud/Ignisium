@@ -1,8 +1,10 @@
 use std::borrow::Cow;
+use std::ops::ControlFlow;
 
-use crate::edit::{EditProblem, TextEdit};
+use crate::edit::{self, AppliedEdits, EditBatch, EditProblem, Effective, EffectiveKind, TextEdit};
 use crate::error::{TextError, TextResult};
 use crate::metadata::DocumentMetadata;
+use crate::offset_map::OffsetMap;
 use crate::revision::RevisionId;
 use crate::text::{StringTextStore, TextStore};
 use crate::{TextOffset, TextRange};
@@ -16,10 +18,19 @@ use crate::{TextOffset, TextRange};
 /// Editing operations return `TextResult<RevisionId>`: invalid offsets are
 /// reported as `TextError`, never as a panic (ADR-0003). Several edits can be
 /// applied as one atomic transaction through [`Document::apply_edits`]
-/// (ADR-0006).
+/// (ADR-0006), and an edit that arrives from outside can name the revision it
+/// was written against through [`Document::apply_batch`] (ADR-0013).
 ///
 /// The document is generic over its storage backend, so a second backend can
 /// be used through the same API (ADR-0008).
+///
+/// # Equality
+///
+/// Equality is *state* equality: same characters, same metadata, same
+/// revision. Two documents that were edited and undid each other back to the
+/// same text compare unequal, because their revision differs. Use
+/// [`Document::text_eq`] for the other question, "same characters" (ADR-0012
+/// decision 7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document<S: TextStore = StringTextStore> {
     store: S,
@@ -87,11 +98,30 @@ impl<S: TextStore> Document<S> {
 
     /// Hands a range of the text to `visit`, piece by piece, without copying.
     ///
-    /// The pieces are only guaranteed to concatenate to `text_in(range)`.
+    /// The pieces are only guaranteed to concatenate to `text_in(range)` -
+    /// unless `visit` returns [`ControlFlow::Break`], which ends the walk
+    /// early. A stop is not an error, so the call still returns `Ok`: use it
+    /// when the caller already has its answer, for example a search hit or a
+    /// closed socket (ADR-0012 decision 5).
+    ///
     /// This is the read to use for a viewport, a search scan or a line index:
     /// on a chunked backend `text_in` allocates the whole range.
-    pub fn for_each_in(&self, range: TextRange, visit: &mut dyn FnMut(&str)) -> TextResult<()> {
+    pub fn for_each_in(
+        &self,
+        range: TextRange,
+        visit: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> TextResult<()> {
         self.store.for_each_in(range, visit)
+    }
+
+    /// Whether `other` holds the same characters, whatever its revision and
+    /// metadata are.
+    ///
+    /// This is the question undo/redo, dirty checking and "did the formatter
+    /// change anything" ask. It is not the same as `==`, which compares the
+    /// whole state (ADR-0012 decision 7).
+    pub fn text_eq(&self, other: &Self) -> bool {
+        self.store.text() == other.store.text()
     }
 
     /// Length of the text in UTF-8 bytes.
@@ -179,8 +209,12 @@ impl<S: TextStore> Document<S> {
     /// - **All or nothing.** If any edit is invalid, the text is left as it
     ///   was and the first problem is returned. Use
     ///   [`Document::edit_problems`] to see all of them.
-    /// - **No overlap.** Two edits may not claim the same text. Combine two
-    ///   edits on the same spot into a single [`TextEdit::replace`].
+    /// - **No overlap.** Two edits may not consume the same text. Two
+    ///   insertions at one offset are the exception: they are applied in batch
+    ///   order (ADR-0013 decision 2).
+    /// - **One intent, one spelling.** Replacing an empty range is an
+    ///   insertion, replacing with no text is a delete, and the conflict rules
+    ///   do not care which spelling the host used (ADR-0012 decision 1).
     /// - **One revision.** A transaction advances the revision exactly once.
     /// - **No work, no revision.** Edits that would change nothing are dropped
     ///   before anything is validated.
@@ -188,97 +222,147 @@ impl<S: TextStore> Document<S> {
     /// Edits are applied from the end of the document towards the start, so an
     /// edit never moves the text another edit still has to touch.
     pub fn apply_edits(&mut self, edits: &[TextEdit]) -> TextResult<RevisionId> {
-        self.guard_writable()?;
+        self.apply_at(self.revision, edits)
+            .map(|applied| applied.revision)
+    }
 
-        if let Some(problem) = self.edit_problems(edits).first() {
+    /// Applies a batch that names the revision it was written against.
+    ///
+    /// This is the entry point for an edit that did not originate in the
+    /// process holding the document, for example one that came over a socket:
+    /// if the document has moved on since `batch.at`, the batch is rejected
+    /// with [`TextError::StaleRevision`] before any of its offsets are looked
+    /// at, because those offsets describe text that no longer exists
+    /// (ADR-0013 decision 1).
+    ///
+    /// The revised batch otherwise follows exactly the rules of
+    /// [`Document::apply_edits`]. The returned [`AppliedEdits`] carries the new
+    /// revision and an [`OffsetMap`], which answers where an offset of the
+    /// pre-batch text points now.
+    pub fn apply_batch(&mut self, batch: &EditBatch) -> TextResult<AppliedEdits> {
+        self.apply_at(batch.at, &batch.edits)
+    }
+
+    /// Reports every problem with `edits`, without touching the text.
+    ///
+    /// The problems are returned in batch order: by index, and within one
+    /// index the endpoint problems before the conflicts. An empty result means
+    /// the batch can be applied. Whether the document accepts edits at all
+    /// (`read_only`) is answered by `apply_edits`.
+    pub fn edit_problems(&self, edits: &[TextEdit]) -> Vec<EditProblem> {
+        self.plan(edits).1
+    }
+
+    /// The pipeline both entry points run (ADR-0012 decision 3):
+    /// `Normalize -> Validate (against the snapshot) -> [Order -> Apply]`.
+    ///
+    /// The first two stages are one implementation, so "which edits are
+    /// checked" and "which edits are applied" cannot drift. Ordering and
+    /// applying are the caller's job, on the effective edits returned here.
+    fn plan<'a>(&self, edits: &'a [TextEdit]) -> (Vec<Effective<'a>>, Vec<EditProblem>) {
+        let effective = edit::normalize(edits);
+
+        let mut problems = Vec::new();
+        let mut well_formed = Vec::with_capacity(effective.len());
+
+        for current in &effective {
+            // An edit that is going to be rejected anyway must not contribute
+            // a second-order conflict to the report (ADR-0012 decision 2).
+            if self.collect_range_problems(current, &mut problems) {
+                well_formed.push(current);
+            }
+        }
+
+        let conflicts = edit::conflicts(&well_formed);
+
+        problems.extend(conflicts);
+        problems.sort_by_key(|problem| {
+            (
+                problem.index,
+                u8::from(matches!(problem.error, TextError::OverlappingEdits { .. })),
+            )
+        });
+
+        (effective, problems)
+    }
+
+    fn apply_at(&mut self, at: RevisionId, edits: &[TextEdit]) -> TextResult<AppliedEdits> {
+        self.guard_writable()?;
+        self.guard_revision(at)?;
+
+        let (effective, problems) = self.plan(edits);
+
+        if let Some(problem) = problems.first() {
             return Err(problem.error.clone());
         }
 
-        let mut ordered: Vec<(usize, &TextEdit)> = edits
-            .iter()
-            .enumerate()
-            .filter(|(_, edit)| !edit.is_noop())
-            .collect();
-
-        if ordered.is_empty() {
-            return Ok(self.revision);
+        if effective.is_empty() {
+            return Ok(AppliedEdits {
+                revision: self.revision,
+                map: OffsetMap::new(),
+            });
         }
+
+        let mut ordered: Vec<&Effective<'_>> = effective.iter().collect();
 
         // Back to front, so that every edit still sees the coordinates it was
         // written with: higher offsets first, at the same offset ranges before
-        // insertions, and at the same offset and kind in reverse batch order.
-        ordered.sort_by(|(left_index, left), (right_index, right)| {
+        // insertions, and at the same offset and kind in reverse batch order -
+        // which is what makes two insertions at one offset read in batch order.
+        ordered.sort_by(|left, right| {
             right
                 .span()
                 .start
                 .cmp(&left.span().start)
                 .then_with(|| left.is_insertion().cmp(&right.is_insertion()))
-                .then_with(|| right_index.cmp(left_index))
+                .then_with(|| right.index().cmp(&left.index()))
         });
 
-        for (_, edit) in ordered {
+        let mut applied = Vec::with_capacity(ordered.len());
+
+        for edit in ordered {
+            applied.push((edit.span(), edit.replacement_len()));
             self.apply_edit(edit)?;
         }
 
-        Ok(self.advance_revision())
-    }
+        let revision = self.advance_revision();
 
-    /// Reports every problem with `edits`, without touching the text.
-    ///
-    /// The problems are returned in batch order. An empty result means the
-    /// batch can be applied. Whether the document accepts edits at all
-    /// (`read_only`) is answered by `apply_edits`.
-    pub fn edit_problems(&self, edits: &[TextEdit]) -> Vec<EditProblem> {
-        let effective: Vec<(usize, &TextEdit)> = edits
-            .iter()
-            .enumerate()
-            .filter(|(_, edit)| !edit.is_noop())
-            .collect();
-
-        let mut problems = Vec::new();
-
-        for (position, (index, edit)) in effective.iter().enumerate() {
-            self.collect_range_problems(*index, edit, &mut problems);
-
-            for (other_index, other) in effective.iter().take(position) {
-                if edit.claim().intersects(&other.claim()) {
-                    problems.push(EditProblem {
-                        index: *index,
-                        error: TextError::OverlappingEdits {
-                            first: *other_index,
-                            second: *index,
-                        },
-                    });
-                }
-            }
-        }
-
-        problems.sort_by_key(|problem| problem.index);
-
-        problems
+        Ok(AppliedEdits {
+            revision,
+            map: OffsetMap::from_edits(applied),
+        })
     }
 
     /// One edit, applied to a document whose text already passed validation.
-    fn apply_edit(&mut self, edit: &TextEdit) -> TextResult<()> {
-        match edit {
-            TextEdit::Insert { offset, text } => self.store.insert(*offset, text)?,
-            TextEdit::Delete { range } => self.store.delete(*range)?,
-            TextEdit::Replace { range, text } => {
+    ///
+    /// Contract (ADR-0012 decision 6): once `validate_offset` / `validate_range`
+    /// has accepted the arguments, a backend does not fail. Breaking it is a
+    /// backend bug, so it is asserted in debug builds; in release the error is
+    /// still propagated instead of being swallowed.
+    fn apply_edit(&mut self, edit: &Effective<'_>) -> TextResult<()> {
+        let result = match edit.kind() {
+            EffectiveKind::Insert { offset, text } => self.store.insert(offset, text),
+            EffectiveKind::Delete { range } => self.store.delete(range),
+            EffectiveKind::Replace { range, text } => {
                 // `range.start` stays a character boundary after the removal.
-                self.store.delete(*range)?;
-                self.store.insert(range.start, text)?;
+                self.store.delete(range)?;
+                self.store.insert(range.start, text)
             }
-        }
+        };
 
-        Ok(())
+        debug_assert!(result.is_ok(), "a validated edit must not fail: {result:?}");
+
+        result
     }
 
+    /// Records the endpoint problems of one edit and reports whether it is
+    /// well-formed enough to take part in the conflict scan.
     fn collect_range_problems(
         &self,
-        index: usize,
-        edit: &TextEdit,
+        edit: &Effective<'_>,
         problems: &mut Vec<EditProblem>,
-    ) {
+    ) -> bool {
+        let index = edit.index();
         let range = edit.span();
 
         if range.start > range.end {
@@ -290,24 +374,41 @@ impl<S: TextStore> Document<S> {
                 },
             });
 
-            return;
+            return false;
         }
 
         // An insertion has a single endpoint; checking it twice would report
         // the same problem twice.
         let endpoints = if edit.is_insertion() { 1 } else { 2 };
+        let mut well_formed = true;
 
         for offset in [range.start, range.end].into_iter().take(endpoints) {
             if let Err(error) = self.store.validate_offset(offset) {
                 problems.push(EditProblem { index, error });
+                well_formed = false;
             }
         }
+
+        well_formed
     }
 
     /// Read-only is document policy, not offset policy (ADR-0003).
     fn guard_writable(&self) -> TextResult<()> {
         if self.metadata.is_read_only() {
             return Err(TextError::ReadOnly);
+        }
+
+        Ok(())
+    }
+
+    /// A batch that names a revision is only meaningful for that revision
+    /// (ADR-0013 decision 1).
+    fn guard_revision(&self, at: RevisionId) -> TextResult<()> {
+        if at != self.revision {
+            return Err(TextError::StaleRevision {
+                expected: at,
+                actual: self.revision,
+            });
         }
 
         Ok(())
@@ -1036,5 +1137,289 @@ mod tests {
 
         assert_eq!(document.revision(), RevisionId::INITIAL);
         assert_eq!(document.text(), "Hello");
+    }
+
+    // -- normalization ----------------------------------------------------
+    //
+    // One intent has one spelling: `Replace` of an empty range is an
+    // insertion, `Replace` with no text is a delete, and neither the conflict
+    // rules nor the report depend on how the host wrote it (ADR-0012).
+
+    #[test]
+    fn the_two_spellings_of_an_insertion_behave_the_same() {
+        let mut spelled_as_insert = Document::from_text("abc");
+        let mut spelled_as_replace = Document::from_text("abc");
+
+        spelled_as_insert
+            .apply_edits(&[
+                TextEdit::insert(TextOffset(1), "X"),
+                TextEdit::insert(TextOffset(1), "Y"),
+            ])
+            .unwrap();
+        spelled_as_replace
+            .apply_edits(&[
+                TextEdit::insert(TextOffset(1), "X"),
+                TextEdit::replace(TextRange::new(TextOffset(1), TextOffset(1)), "Y"),
+            ])
+            .unwrap();
+
+        assert_eq!(spelled_as_insert.text(), "aXYbc");
+        assert_eq!(spelled_as_replace.text(), spelled_as_insert.text());
+    }
+
+    #[test]
+    fn the_two_spellings_of_a_delete_behave_the_same() {
+        let mut spelled_as_delete = Document::from_text("abcdef");
+        let mut spelled_as_replace = Document::from_text("abcdef");
+
+        spelled_as_delete
+            .delete(TextRange::new(TextOffset(1), TextOffset(4)))
+            .unwrap();
+        spelled_as_replace
+            .replace(TextRange::new(TextOffset(1), TextOffset(4)), "")
+            .unwrap();
+
+        assert_eq!(spelled_as_delete.text(), "aef");
+        assert_eq!(spelled_as_replace.text(), spelled_as_delete.text());
+    }
+
+    #[test]
+    fn an_empty_range_replace_is_reported_as_one_insertion() {
+        let document = Document::from_text("abc");
+
+        let problems = document.edit_problems(&[TextEdit::replace(
+            TextRange::new(TextOffset(9), TextOffset(9)),
+            "x",
+        )]);
+
+        // Once, not twice: after normalization an insertion has one endpoint.
+        assert_eq!(
+            problems,
+            vec![EditProblem {
+                index: 0,
+                error: TextError::OffsetOutOfRange { offset: 9, len: 3 },
+            }]
+        );
+    }
+
+    // -- same-offset insertions -------------------------------------------
+
+    #[test]
+    fn two_insertions_at_one_offset_read_in_batch_order() {
+        let mut document = Document::from_text("abc");
+
+        document
+            .apply_edits(&[
+                TextEdit::insert(TextOffset(1), "X"),
+                TextEdit::insert(TextOffset(1), "Y"),
+            ])
+            .unwrap();
+
+        assert_eq!(document.text(), "aXYbc");
+    }
+
+    #[test]
+    fn swapping_the_insertions_swaps_the_text() {
+        let mut document = Document::from_text("abc");
+
+        document
+            .apply_edits(&[
+                TextEdit::insert(TextOffset(1), "Y"),
+                TextEdit::insert(TextOffset(1), "X"),
+            ])
+            .unwrap();
+
+        assert_eq!(document.text(), "aYXbc");
+    }
+
+    #[test]
+    fn an_insertion_and_a_range_at_one_offset_still_conflict() {
+        let mut document = Document::from_text("abcdef");
+
+        assert_eq!(
+            document.apply_edits(&[
+                TextEdit::insert(TextOffset(1), "x"),
+                TextEdit::delete(TextRange::new(TextOffset(1), TextOffset(4))),
+            ]),
+            Err(TextError::OverlappingEdits {
+                first: 0,
+                second: 1
+            })
+        );
+        assert_eq!(document.text(), "abcdef");
+    }
+
+    // -- no host offset can panic -----------------------------------------
+
+    /// `usize::MAX` is host input, so it has to be an error. It used to reach
+    /// `offset + 1` in the conflict scan and panic in debug builds
+    /// (ADR-0012, P0-1).
+    #[test]
+    fn an_offset_at_the_end_of_the_range_does_not_panic() {
+        let mut document = Document::from_text("abc");
+
+        let edits = [
+            TextEdit::insert(TextOffset(usize::MAX), "x"),
+            TextEdit::insert(TextOffset(1), "y"),
+        ];
+
+        assert!(matches!(
+            document.edit_problems(&edits).first(),
+            Some(EditProblem {
+                error: TextError::OffsetOutOfRange { .. },
+                ..
+            })
+        ));
+        assert_eq!(
+            document.apply_edits(&edits),
+            Err(TextError::OffsetOutOfRange {
+                offset: usize::MAX,
+                len: 3
+            })
+        );
+        assert_eq!(document.text(), "abc");
+    }
+
+    /// An edit that is already rejected cannot contribute a second-order
+    /// conflict to the report (ADR-0012 decision 2).
+    #[test]
+    fn an_invalid_edit_does_not_take_part_in_the_conflict_scan() {
+        let document = Document::from_text("abc");
+
+        let problems = document.edit_problems(&[
+            TextEdit::insert(TextOffset(9), "x"),
+            TextEdit::insert(TextOffset(9), "y"),
+        ]);
+
+        assert_eq!(problems.len(), 2);
+
+        for problem in problems {
+            assert!(matches!(problem.error, TextError::OffsetOutOfRange { .. }));
+        }
+    }
+
+    // -- revision guard and offset map ------------------------------------
+
+    #[test]
+    fn a_batch_names_the_revision_it_was_written_against() {
+        let mut document = Document::from_text("abc");
+        let batch = EditBatch::new(
+            RevisionId::INITIAL,
+            vec![TextEdit::insert(TextOffset(3), "!")],
+        );
+
+        let applied = document.apply_batch(&batch).unwrap();
+
+        assert_eq!(applied.revision, RevisionId::INITIAL.next());
+        assert_eq!(document.text(), "abc!");
+        assert_eq!(document.revision(), applied.revision);
+    }
+
+    #[test]
+    fn a_stale_batch_is_rejected_before_it_is_validated() {
+        let mut document = Document::from_text("abc");
+        document.insert(TextOffset(3), "!").unwrap();
+
+        // The offsets would be valid for the current text, but the batch says
+        // it was written against r0.
+        let stale = EditBatch::new(
+            RevisionId::INITIAL,
+            vec![TextEdit::insert(TextOffset(4), "?")],
+        );
+
+        assert_eq!(
+            document.apply_batch(&stale),
+            Err(TextError::StaleRevision {
+                expected: RevisionId::INITIAL,
+                actual: RevisionId::INITIAL.next(),
+            })
+        );
+        assert_eq!(document.text(), "abc!");
+        assert_eq!(document.revision(), RevisionId::INITIAL.next());
+    }
+
+    #[test]
+    fn a_read_only_document_refuses_a_batch_too() {
+        let mut document = Document::from_text("abc");
+        let batch = EditBatch::new(
+            RevisionId::INITIAL,
+            vec![TextEdit::insert(TextOffset(3), "!")],
+        );
+        document.set_read_only(true);
+
+        assert_eq!(document.apply_batch(&batch), Err(TextError::ReadOnly));
+    }
+
+    #[test]
+    fn an_empty_batch_returns_the_current_revision_and_an_empty_map() {
+        let mut document = Document::from_text("abc");
+
+        let applied = document
+            .apply_batch(&EditBatch::new(RevisionId::INITIAL, Vec::new()))
+            .unwrap();
+
+        assert_eq!(applied.revision, RevisionId::INITIAL);
+        assert!(applied.map.is_empty());
+    }
+
+    #[test]
+    fn the_map_reports_where_the_offsets_went() {
+        let mut document = Document::from_text("one two three");
+
+        let applied = document
+            .apply_batch(&EditBatch::new(
+                RevisionId::INITIAL,
+                vec![
+                    TextEdit::replace(TextRange::new(TextOffset(0), TextOffset(3)), "1"),
+                    TextEdit::replace(TextRange::new(TextOffset(8), TextOffset(13)), "3"),
+                ],
+            ))
+            .unwrap();
+
+        assert_eq!(document.text(), "1 two 3");
+        assert_eq!(applied.map.len(), 2);
+        // "one" became "1": everything behind it moved two bytes left.
+        assert_eq!(applied.map.map(TextOffset(0)), TextOffset(0));
+        assert_eq!(applied.map.map(TextOffset(5)), TextOffset(3));
+        // A position inside the replaced "three" belongs to its replacement.
+        assert_eq!(applied.map.map(TextOffset(9)), TextOffset(6));
+    }
+
+    // -- equality ---------------------------------------------------------
+
+    /// `==` is state equality: same characters, same metadata, same revision.
+    #[test]
+    fn equality_includes_the_revision() {
+        let mut first = Document::from_text("abc");
+        let second = Document::from_text("abc");
+
+        first.insert(TextOffset(0), "x").unwrap();
+        first
+            .delete(TextRange::new(TextOffset(0), TextOffset(1)))
+            .unwrap();
+
+        assert_eq!(first.text(), second.text());
+        assert_ne!(first, second);
+        assert!(first.text_eq(&second));
+    }
+
+    #[test]
+    fn text_eq_ignores_the_revision_and_the_metadata() {
+        let mut first = Document::from_text("abc");
+        let second = Document::from_text("abc");
+
+        first.set_read_only(true);
+
+        assert_ne!(first, second);
+        assert!(first.text_eq(&second));
+        assert!(second.text_eq(&first));
+    }
+
+    #[test]
+    fn different_text_is_not_text_eq() {
+        let first = Document::from_text("abc");
+        let second = Document::from_text("abd");
+
+        assert!(!first.text_eq(&second));
     }
 }
