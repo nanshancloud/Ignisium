@@ -1,73 +1,101 @@
 # Ignisium
 
-Ignisium is a cross-platform text editor component library written in Rust.
+A cross-platform text editor core, written in Rust.
 
-The project aims to provide a modern, extensible and long-term maintainable
-text editing core.
+Ignisium is the text engine a host application embeds: it owns the text, the
+edits and the positions, and it leaves the window, the input and the platform to
+the host. It aims at a small stable API that can evolve for years.
 
-## Goals
+## Status
 
-- Cross-platform
-- High performance
-- Extensible
-- Stable core API
-- Long-term API evolution
-
-## Current Status
-
-Early development, weeks 1 to 10 of the development plan are done. The crate
-provides the document model and two storage backends:
+Early development. Weeks 1 to 11 of the development plan are done: a document
+model, two storage backends and an edit pipeline.
 
 ```text
 Document<S> ──► TextStore ──► StringTextStore ──► String
                       └─────► RopeTextStore   ──► Rope (tree of chunks)
 ```
 
-| Area | State |
+| Works today | |
 |---|---|
-| `TextOffset` / `TextRange` | byte offsets, UTF-8 boundary validation (ADR-0001, ADR-0004) |
-| `TextStore` | storage abstraction with a range based reading API, `text_in` and the non-copying `for_each_in` (ADR-0002, ADR-0008, ADR-0011) |
-| `TextError` | fallible text operations, no panics on invalid input, `#[non_exhaustive]` (ADR-0003, ADR-0011) |
-| `Document<S>` | storage, metadata and revision, generic over the backend (ADR-0005, ADR-0008) |
-| `TextEdit` | atomic edit transactions; every single edit is a one-edit transaction (ADR-0006, ADR-0010) |
-| `StringTextStore` | the default backend, one contiguous buffer |
-| `RopeTextStore` | rope prototype, a tree of chunks, second backend (ADR-0009) |
-| `Rope` | public rope type, every positional method fallible (ADR-0010) |
-| Benchmarks | Criterion suite, a scaling probe and a backend comparison probe |
-| Backend choice | string by default; the rope is opt in for large documents (ADR-0011) |
+| Positions | `TextOffset` / `TextRange`, UTF-8 byte offsets, invalid input is an error |
+| Storage | `TextStore` abstraction: a whole text, a range, or a range piece by piece |
+| Documents | `Document<S>` with content, metadata and a monotonic revision |
+| Edits | one edit or a batch, atomic, one revision per batch |
+| Remote edits | `EditBatch` names its revision; a stale batch is rejected |
+| Offset map | `AppliedEdits` tells a host where a cursor or a range moved |
+| Backends | `StringTextStore` (default) and `RopeTextStore` (opt-in, experimental) |
+| Tests | one conformance suite runs against every backend |
 
-Not started yet: line index, selection, undo, search, styling, folding,
-layout, rendering and platform abstraction.
+Missing: line index, selection, undo, search, styling, layout, rendering and the
+platform layer.
+
+## Example
+
+```rust
+use ignisium_core::{Document, EditBatch, TextEdit, TextOffset, TextRange};
+
+let mut document = Document::from_text("Hello world");
+
+document
+    .apply_edits(&[TextEdit::replace(TextRange::new(TextOffset(6), TextOffset(11)), "there")])
+    .unwrap();
+assert_eq!(document.text(), "Hello there");
+
+// An edit that comes from outside names the revision it was written against,
+// and the document answers where the old offsets point now.
+let at = document.revision();
+let batch = EditBatch::new(at, vec![TextEdit::insert(TextOffset(0), ">> ")]);
+let applied = document.apply_batch(&batch).unwrap();
+
+assert_eq!(document.text(), ">> Hello there");
+assert_eq!(applied.map.map(TextOffset(6)), TextOffset(9));
+```
+
+## Design rules
+
+- **Byte offsets are the only coordinate.** No line/column, no chunk index, no
+  unit conversion at the boundary.
+- **Host input never panics.** Invalid positions are `TextError` values; only a
+  broken library invariant is an assertion.
+- **One entry point per capability.** A single edit is a one-edit transaction, so
+  there is one set of rules, not two.
+- **The storage layout stays invisible.** Reading happens through ranges and a
+  visitor; a chunk never reaches the host.
+
+Details and the reasoning are in [`docs/decisions/`](docs/decisions) (ADR-0001 to
+ADR-0014).
 
 ## Documentation
 
 | Path | Content |
 |---|---|
-| `docs/decisions/` | architecture decision records (ADR) |
-| `docs/design/` | design documents: text position model, text storage evaluation, open design gaps |
-| `docs/benchmark/` | benchmark requirements and published results |
-| `docs/dependencies/` | third-party dependency records |
-
-`docs/design/open-design-gaps.md` lists the questions the design does not
-answer yet, each with the week that has to answer it, so that a later module
-does not rediscover them as a defect.
+| [`docs/decisions/`](docs/decisions) | architecture decision records |
+| [`docs/design/`](docs/design) | position model, storage evaluation, open design gaps |
+| [`docs/benchmark/`](docs/benchmark) | measured results and the requirements behind them |
 
 ## Development
 
 ```powershell
 cargo fmt --all
 cargo clippy --workspace --all-targets
-cargo test --workspace
+cargo test --workspace          # includes the cross-backend conformance suite
 ```
 
 Benchmarks:
 
 ```powershell
-cargo bench --bench text_store
-cargo bench --bench backends
-cargo test --release --test scaling -- --ignored --nocapture
+cargo bench --bench text_store  # operations on both backends
+cargo bench --bench backends    # string vs rope, one document at a time
+cargo bench --bench edit_batch  # batch validation and apply, 1k and 10k edits
+```
 
-# The probes run one at a time: they share a global allocation counter.
+The probes in `tests/backend_probe.rs` and `tests/scaling.rs` are `#[ignore]`d
+because they allocate hundreds of megabytes and share a global allocation
+counter; run them one at a time:
+
+```powershell
+cargo test --release --test scaling -- --ignored --nocapture
 cargo test --release --test backend_probe backend_comparison -- --ignored --nocapture
 cargo test --release --test backend_probe memory_comparison -- --ignored --nocapture
 cargo test --release --test backend_probe read_strategy_comparison -- --ignored --nocapture
