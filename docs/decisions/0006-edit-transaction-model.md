@@ -110,6 +110,14 @@ overflowing. A `Replace` written over an empty range therefore conflicts with an
 (O(k log k + p)) instead of a pairwise comparison, and it compares only edits
 whose endpoints validated. The reported pairs and their order are unchanged.
 
+**Amended by ADR-0013:** two insertions at one position are not a conflict. An
+asynchronous writer streams one token at a time at one logical cursor, so
+`Insert at 3` twice in one batch is accepted and reads as the two texts in batch
+order, which is what the tie-break of rule 4 already produces (back to front,
+reverse batch order). An insertion still conflicts with a range that consumes
+its position; that is what the `+1` sentinel is for. Nothing is implemented yet;
+the amendment rides on ADR-0012's week 11 work.
+
 The escape hatch is `TextEdit::replace`: an edit that removes a range and
 inserts at `range.start` is one claim, not two. That is how a host expresses
 auto-indent:

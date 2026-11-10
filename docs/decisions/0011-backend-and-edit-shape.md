@@ -129,6 +129,13 @@ impl Document<S> {
   type of `apply_edits`, which is why the shape was decided now and not in
   week 15.
 
+**Amended by ADR-0013:** `EditBatch`, `apply_batch`, `AppliedEdits` and
+`TextError::StaleRevision` are pulled forward from week 15 to **week 11**,
+because an asynchronous writer needs the revision guard before it needs
+multi-cursor. The shape above does not change, and the map lands with the guard
+rather than after it, so `apply_batch` has one signature for its whole life.
+Week 15 consumes the map (multi-cursor, undo); it no longer creates it.
+
 Reason for the shape rather than a second `apply_edits_at` method: one
 argument list cannot grow, and an edit transaction that knows its revision is
 also the value undo needs to record (week 16).
@@ -172,8 +179,8 @@ This had to happen before the first external host, not after.
   the shape.
 - Week 13 uses `for_each_in` for the line index, and measures the line scan on
   the rope with it.
-- Week 15 implements `EditBatch` and `OffsetMap` together with the multi-cursor
-  work, and records the cursor mapping rule next to `OffsetMap` instead of
-  letting every host invent it.
+- Week 15 uses `EditBatch` and `OffsetMap` for the multi-cursor work (both land
+  in week 11 with the guard, per ADR-0013), and records the cursor mapping rule
+  next to `OffsetMap` instead of letting every host invent it.
 - Snapshot sharing (ADR-0009) remains the one place where the prototype is
   behind; it becomes urgent in week 18, not before.

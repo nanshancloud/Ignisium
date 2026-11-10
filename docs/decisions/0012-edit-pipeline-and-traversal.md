@@ -2,9 +2,26 @@
 
 ## Status
 
-Accepted. Decisions 1 to 5 and 7 are implemented at the start of week 11, before
-the chunk model and before the first external host. Decision 6 is implemented by
-the rope in week 12, with the long-line work that re-examines the chunk sizes.
+Accepted. **Planned, not implemented.** Decisions 1 to 5 and 7 are scheduled
+for week 11, before the chunk model and before the first external host; decision
+6 lands in week 12, with the long-line work that re-examines the chunk sizes.
+
+The state of the code at the end of week 10 is the state described in Context:
+`claim()` still adds one to an offset the host chose (`edit.rs`), `edit_problems`
+is still the pairwise loop (`document.rs`), `for_each_in` still returns `()`
+(`store.rs`, `rope.rs`), `Rope` still derives `PartialEq`, and
+`TextStore::replace` does not exist. Nothing in this ADR should be read as
+"already in the tree".
+
+Two consequences for a reader who arrives later:
+
+- The week table in ADR-0013 is the schedule for the decisions here; this ADR is
+  the decision record, not the plan.
+- Decision 1's conflict rule ("two edits that write at the same position are
+  rejected no matter how they are spelled") is refined by ADR-0013 decision 2
+  for machine-rate writes: two insertions at one offset are ordered, not
+  rejected. The refinement is cheap to fold in because decision 1 has not been
+  implemented yet.
 
 Refines ADR-0006 (transaction rules), ADR-0008 (the layout stays invisible) and
 ADR-0011 (decision 3, `for_each_in`).

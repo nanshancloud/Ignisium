@@ -50,10 +50,12 @@ visitor is the one that does not copy. Decide in week 10, land before week 13.
 overrides the default to walk its chunks. Measured at 10 MiB: 548 us to
 6.9 us for a 1 MiB range, and no allocation.
 
-**Follow-up (ADR-0012).** The visitor now returns `ControlFlow<()>`: a scan
-stops at the first hit instead of paying for the rest of the range. Without it,
-search (week 18) could not use the non-copying read at all, and the signature
-would have to change after week 13's line index was written against it.
+**Follow-up (ADR-0012, planned for week 11).** The visitor is to return
+`ControlFlow<()>`, so a scan stops at the first hit instead of paying for the
+rest of the range. Without it, search (week 18) could not use the non-copying
+read at all, and the signature would have to change after week 13's line index
+was written against it. Not in the code yet: `store.rs` and `rope.rs` still take
+`&mut dyn FnMut(&str)`.
 
 ## G2 - No revision guard on an edit
 
@@ -83,6 +85,14 @@ cannot currently perform it.
 
 **Recommendation.** Option 2. It also gives `apply_edits` a natural place to
 return more than a `RevisionId` (see G3) without growing the argument list.
+
+**Scheduled (ADR-0013).** Pulled forward from week 15 to **week 11**. The reason
+is not a feature: an edit that arrives from a transport was written against a
+revision the host read some time earlier, so the guard belongs on the transfer
+path. The shape is `EditBatch { at: RevisionId, edits: Vec<TextEdit> }` applied
+by `Document::apply_batch`, with `TextError::StaleRevision`, checked before
+validation. Not implemented: there is no `EditBatch` and no `StaleRevision` in
+the code at the end of week 10.
 
 ## G3 - An edit does not report where the text moved
 
@@ -117,6 +127,12 @@ macro).
 **cheap now and expensive later**: after a host exists, changing the return
 type of `apply_edits` is a breaking change in the hottest API of the crate.
 
+**Scheduled (ADR-0013), week 11.** Pulled forward from week 15 with G2, because
+`apply_batch` returning only a `RevisionId` and gaining the map in week 15 would
+change the return type of a brand-new API. The map is cheap where the pipeline
+already stands: the claims are ordered, so it is a sorted vector plus a binary
+search. Week 15 then uses it for multi-cursor and undo instead of creating it.
+
 ## G4 - Batch validation is quadratic in the number of edits
 
 **Situation.** `Document::edit_problems` compares every edit with every
@@ -138,12 +154,17 @@ the sort). The error still names the pair.
 15), together with a large-batch benchmark so that the fix is measured, not
 assumed.
 
-**Closed early (ADR-0012).** The loop is where `claim()` overflowed, so it is
-rewritten once instead of twice: the claims are normalized, sorted by
-`(start, end)` and swept, giving O(k log k + p). The benchmark required by the
-gate is added with the change (`benches/edit_batch.rs`), so "cheaper" is a
-measurement rather than a complexity argument. Note that the *result* is
-unchanged: one `OverlappingEdits` per conflicting pair, in batch order.
+**Decided (ADR-0012), week 11.** The loop is where `claim()` overflowed, so it
+is to be rewritten once instead of twice: the claims are normalized, sorted by
+`(start, end)` and swept, giving O(k log k + p). The benchmark the gate requires
+is added with the change (`benches/edit_batch.rs`), so "cheaper" is a measurement
+rather than a complexity argument. Note that the *result* is unchanged: one
+`OverlappingEdits` per conflicting pair, in batch order.
+
+Not implemented at the end of week 10: `document.rs` still runs
+`effective.iter().take(position)` per edit, and `benches/edit_batch.rs` does not
+exist.
+
 ## G5 - A snapshot is a deep copy
 
 **Situation.** `Rope` derives `Clone`, and cloning it copies every chunk and
@@ -168,6 +189,14 @@ old states), week 24 (rendering from a stable view while the user types).
 **Recommendation.** Option 1, if week 10 decides the rope becomes the default
 for large documents. It is a change to `Node`, not to the public API, which
 is why it can wait for that decision - but it must not wait past week 18.
+
+**Scheduled (ADR-0013), week 13.** Both conditions are now met: the rope is the
+documented backend for documents at or above 1 MiB that receive machine-rate
+edits (ADR-0013 decision 6), and the cost is on the transfer path rather than on
+search - sending the document out is the highest-frequency operation of a
+session, and every round trip currently pays O(n): 21.5 ms at 100 MiB on the
+string backend, 26.5 ms on the rope, for a copy that shares nothing. Pulled
+forward from week 18.
 
 ## G6 - The error types are not ready for evolution
 
@@ -331,7 +360,11 @@ everywhere. 3. Remove `PartialEq` from `Rope`.
 public type), not in `Document`, whose three-part comparison is a useful *state*
 comparison once the store comparison is semantic.
 
-**Closed (ADR-0012).**
+**Decided (ADR-0012), week 11.** Option 1: a manual `PartialEq for Rope` over
+length and text, `Document::text_eq` for the content-only question, and
+`Document`'s derive documented as a three-part *state* comparison. Not
+implemented at the end of week 10: `Rope` and `Node` still derive `PartialEq`,
+and there is no `Document::text_eq`.
 
 ## G12 - "Validated means infallible" is a contract nobody wrote down
 
@@ -361,35 +394,75 @@ one operation in one place.
 
 **Decided (ADR-0012).** The contract and the debug assertion land in week 11
 with the conformance suite; `TextStore::replace` and its rope override land in
-week 12.
+week 12. Not implemented: `TextStore` has no `replace` and `apply_edit` still
+calls `delete` then `insert` with a comment holding them together.
+
+## G13 - The edit path assumes a human writer
+
+**Situation.** Three interfaces are written as if an edit always arrives alone,
+at human rate, referring to "now": a batch carries no revision (G2), one edit is
+one transaction is one revision (ADR-0010), and two insertions at one offset are
+a conflict. The last one had no entry of its own before this one, and it is the
+sharpest:
+`claim()` gives an insertion `[p, p + 1)` (`edit.rs`), so a token stream that
+writes every token at the same logical cursor cannot express two tokens at `p`
+in one batch - the host must concatenate them into a `String` first.
+
+**Why.** The model was built from a single local writer's point of view, where
+"two edits at one position" is either a paste or a bug, and where a revision per
+edit is the cheapest thing that can be true.
+
+**When it hurts.** As soon as a model streams into a document: one edit per token
+means one revision per token (1000-token answer = r1 to r1000, and every
+revision-keyed cache invalidated 1000 times), and buffering the tokens by hand
+means the host owns the text granularity it then has to define for undo.
+
+**Options.** 1. Order same-point insertions by batch order instead of rejecting
+them, and let the host batch a stream per flush (core unchanged otherwise).
+2. A core streaming session (`begin` / `push` / `commit`) that owns the buffer
+and the timer. 3. Leave it: the host concatenates and re-batches.
+
+**Recommendation.** Option 1. Option 2 puts a timer and a buffer policy in a
+zero-dependency library and cannot be shared with the second writer; option 3 is
+what option 1 makes unnecessary for the token case without taking the decision
+away from the host.
+
+**Decided (ADR-0013).** Two insertions at one offset are ordered, not rejected
+(week 11); a stream is one batch per flush and the session is host state (week
+12). Not implemented.
 
 ## Summary
 
+"State" is what the code does at the end of week 10, not what an ADR says: no
+decision of ADR-0012 and none of ADR-0013 is in the tree yet.
+
 | Gap | Decision by | Changes an existing API | State |
 |---|---|---|---|
-| G1 range read copies | week 10, land by 13 | additive | **closed**: `for_each_in` (ADR-0011) + stoppable visitor (ADR-0012) |
-| G2 no revision guard | week 10 | no, additive `EditBatch` | **decided**: shape in ADR-0011, implement by 15 |
-| G3 no offset map | week 10 (shape), land by 15 | no, additive `AppliedEdits` | **decided**: shape in ADR-0011, implement by 15 |
-| G4 quadratic validation | week 15 | no | **closed early**: normalized claims, sorted sweep (ADR-0012) |
-| G5 snapshot is a deep copy | week 10 decision, work by 18 | no (`Clone` semantics) | open, until 18 |
+| G1 range read copies | week 10, land by 13 | additive | **half closed**: `for_each_in` landed (ADR-0011); the stoppable visitor is decided (ADR-0012) and scheduled for week 11 |
+| G2 no revision guard | week 11 | no, additive `EditBatch` | **decided**: shape in ADR-0011, pulled forward from 15 to week 11 by ADR-0013; not implemented |
+| G3 no offset map | week 11 | no, additive `AppliedEdits` | **decided**: shape in ADR-0011, pulled forward from 15 to week 11 by ADR-0013; not implemented |
+| G4 quadratic validation | week 11 | no | **decided**: normalized claims, sorted sweep (ADR-0012), week 11; not implemented |
+| G5 snapshot is a deep copy | week 13 | no (`Clone` semantics) | **decided**: shared nodes (ADR-0013), pulled forward from 18 to week 13 |
 | G6 error types not evolvable | week 10 | additive now | **closed**: `#[non_exhaustive]` in ADR-0011 |
 | G7 rope exported | week 10 | no, stays public | **decided**: public and Experimental (ADR-0011) |
-| G8 no conformance suite | week 10-11 | no | open, week 11 |
+| G8 no conformance suite | week 11 | no | open, week 11 |
 | G9 smaller gaps | as listed | mostly no | memory **measured** (rope costs 6%) |
 | G10 delete never merges nodes | week 12 | no | open, week 12 |
-| G11 equality compares layout | week 11 | `Rope`'s `PartialEq` semantics | **closed**: content equality + `Document::text_eq` (ADR-0012) |
+| G11 equality compares layout | week 11 | `Rope`'s `PartialEq` semantics | **decided**: content equality + `Document::text_eq` (ADR-0012), week 11; not implemented |
 | G12 validated-means-infallible unwritten | week 11 contract, week 12 `replace` | no, additive `TextStore::replace` | **decided**: contract + debug assert + conformance test (ADR-0012) |
+| G13 the edit path assumes a human writer | week 11 ordering, week 12 flush | `OverlappingEdits` no longer covers insert vs insert | **decided**: ordered same-point insertions, one batch per flush (ADR-0013); not implemented |
 
 The one item that was cheap now and expensive later was the **return type of
 `apply_edits`** (G2 + G3): it is the centre of the host-facing API, and every
 week from 15 onwards wants more from it than a `RevisionId`. ADR-0011 answers
 that with an additive shape - `EditBatch` carries the revision, `AppliedEdits`
 carries the offset map - and leaves `apply_edits` untouched, so no host has to
-be migrated.
+be migrated. ADR-0013 then moves both to week 11, because an asynchronous writer
+needs the guard before it needs the map, and both arrive in one signature.
 
-The remaining gaps all have a week: G8 and the contract half of G12 in week 11,
-G10 and the `replace` half of G12 in week 12 (with the long-line work), G5
-before the background search, G9 items as listed.
+The remaining gaps all have a week: G1's stoppable visitor, G2, G3, G4, G8, G11
+and the contract half of G12 in week 11; G10, G13's flush policy and the
+`replace` half of G12 in week 12; G5 in week 13; G9 items as listed.
 
 ## Relation to the ADRs
 
@@ -401,4 +474,9 @@ before the background search, G9 items as listed.
 - ADR-0010 records the hardening that makes G7 a choice instead of a defect.
 - ADR-0011 decides the backend, the read strategy and the edit batch shape.
 - ADR-0012 normalizes edits, makes claims total, makes the read stoppable and
-  makes equality semantic.
+  makes equality semantic. Its decisions are planned, not implemented; its
+  week table lives in ADR-0013.
+- ADR-0013 places the pipeline in time: a batch names its revision and returns
+  the offset map (G2, G3), two insertions at one offset are ordered instead of
+  rejected (G13), a stream is one batch per flush (G13), snapshots share nodes
+  (G5) and machine-rate edits run on the rope.
